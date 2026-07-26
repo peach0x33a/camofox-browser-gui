@@ -1,0 +1,21 @@
+{
+  "name": "camofox-gui",
+  "version": "1.0.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peach0x33a/camofox-browser-gui.git"
+  },
+  "description": "Local control panel for camofox-browser: per-profile HTTPS proxies, batch profile creation, one-click launch",
+  "type": "module",
+  "bin": {
+    "camofox-gui": "./src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}

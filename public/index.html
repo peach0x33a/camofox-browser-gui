@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Camofox 控制台</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🦊</span>
+      <div>
+        <h1>Camofox 控制台</h1>
+        <p class="muted" id="camofoxDirLabel">—</p>
+      </div>
+    </div>
+    <div class="conn">
+      <span class="dot" id="connDot"></span>
+      <span id="connText">连接中…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="card-head" data-toggle="settingsBody">
+        <h2>全局设置</h2>
+        <span class="chev">▾</span>
+      </div>
+      <div class="card-body" id="settingsBody">
+        <div class="grid">
+          <label>camofox-browser 目录
+            <input id="setCamofoxDir" type="text" placeholder="/path/to/camofox-browser" />
+          </label>
+          <label>起始端口
+            <input id="setBasePort" type="number" min="1024" max="65000" />
+          </label>
+          <label>默认起始网址
+            <input id="setStartUrl" type="text" placeholder="https://..." />
+          </label>
+          <label>默认模式
+            <select id="setDefaultMode">
+              <option value="visible">可见窗口</option>
+              <option value="headless">无头（仅 API）</option>
+            </select>
+          </label>
+        </div>
+
+        <h3>全局 HTTPS 代理 <span class="muted small">（profile 选择「跟随全局」时使用；可保存多个随时切换）</span></h3>
+        <div class="proxy-picker">
+          <select id="setProxySelect" aria-label="全局代理"></select>
+          <button id="btnProxyAdd">+ 添加</button>
+          <button id="btnProxyEdit">编辑</button>
+          <button class="danger" id="btnProxyDelete">删除</button>
+          <button id="btnTestProxy">测试</button>
+        </div>
+        <p id="proxyTestResult" class="muted small result-line"></p>
+        <div class="row">
+          <button class="primary" id="btnSaveSettings">保存设置</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head static">
+        <h2>Profiles <span class="muted small" id="profileCount"></span></h2>
+        <div class="toolbar">
+          <button class="primary" id="btnNew">+ 新建</button>
+          <button id="btnBatch">批量添加</button>
+          <button id="btnStartSelected">▶ 启动选中</button>
+          <button id="btnStopSelected">■ 停止选中</button>
+          <button class="danger" id="btnDeleteSelected">删除选中</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="profileTable">
+          <thead>
+            <tr>
+              <th class="tight"><input type="checkbox" id="checkAll" /></th>
+              <th>名称</th>
+              <th>模式</th>
+              <th>代理</th>
+              <th class="tight">端口</th>
+              <th>状态</th>
+              <th class="actions-col">操作</th>
+            </tr>
+          </thead>
+          <tbody id="profileBody"></tbody>
+        </table>
+        <p class="empty" id="emptyHint">还没有 profile，点「新建」或「批量添加」。</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head static">
+        <h2>运行日志</h2>
+        <div class="toolbar">
+          <select id="logSelect"></select>
+          <button id="btnClearLog">清空显示</button>
+        </div>
+      </div>
+      <pre id="logView" class="log"></pre>
+    </section>
+  </main>
+
+  <!-- 新建 / 编辑 -->
+  <div class="modal" id="profileModal" hidden>
+    <div class="modal-card">
+      <h2 id="profileModalTitle">新建 Profile</h2>
+      <div class="grid">
+        <label>名称 <input id="pfName" type="text" /></label>
+        <label>模式
+          <select id="pfMode">
+            <option value="visible">可见窗口</option>
+            <option value="headless">无头（仅 API）</option>
+          </select>
+        </label>
+        <label>起始网址 <input id="pfStartUrl" type="text" placeholder="留空则用全局默认" /></label>
+        <label>端口 <input id="pfPort" type="number" placeholder="自动分配" /></label>
+        <label>代理来源
+          <select id="pfProxyMode">
+            <option value="global">跟随全局代理</option>
+            <option value="custom">使用独立代理</option>
+            <option value="none">不使用代理</option>
+          </select>
+        </label>
+        <label>备注 <input id="pfNote" type="text" /></label>
+      </div>
+      <div class="grid proxy-grid" id="pfProxyFields">
+        <label>协议
+          <select id="pfProxyScheme">
+            <option value="http">http</option>
+            <option value="https">https</option>
+            <option value="socks5">socks5</option>
+          </select>
+        </label>
+        <label>地址 <input id="pfProxyHost" type="text" /></label>
+        <label>端口 <input id="pfProxyPort" type="text" /></label>
+        <label>用户名 <input id="pfProxyUser" type="text" autocomplete="off" /></label>
+        <label>密码 <input id="pfProxyPass" type="password" autocomplete="new-password" /></label>
+        <label class="span2 muted small">支持一行粘贴：<code>host:port:user:pass</code> 或 <code>user:pass@host:port</code>
+          <input id="pfProxyPaste" type="text" placeholder="粘贴后自动拆分到上面的输入框" />
+        </label>
+      </div>
+      <p class="error" id="profileModalError"></p>
+      <div class="row right">
+        <button data-close-modal="profileModal">取消</button>
+        <button class="primary" id="btnSaveProfile">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加 / 编辑代理 -->
+  <div class="modal" id="proxyModal" hidden>
+    <div class="modal-card">
+      <h2 id="proxyModalTitle">添加代理</h2>
+      <div id="proxyPasteBlock">
+        <label class="block">粘贴代理 <span class="muted small">一行一个，可一次添加多个</span>
+          <textarea id="pxList" rows="6" placeholder="1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;user:pass@1.2.3.4:8080&#10;socks5://1.2.3.4:1080"></textarea>
+        </label>
+        <p class="muted small">或者在下面逐项填写：</p>
+      </div>
+      <div class="grid proxy-grid">
+        <label>协议
+          <select id="pxScheme">
+            <option value="http">http（常见的 HTTPS 代理）</option>
+            <option value="https">https（到代理本身加密）</option>
+            <option value="socks5">socks5</option>
+          </select>
+        </label>
+        <label>地址 <input id="pxHost" type="text" placeholder="1.2.3.4" /></label>
+        <label>端口 <input id="pxPort" type="text" placeholder="8080" /></label>
+        <label>用户名 <input id="pxUser" type="text" autocomplete="off" /></label>
+        <label>密码 <input id="pxPass" type="password" autocomplete="new-password" /></label>
+      </div>
+      <p class="error" id="proxyModalError"></p>
+      <div class="row right">
+        <button data-close-modal="proxyModal">取消</button>
+        <button class="primary" id="btnSaveProxy">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量添加 -->
+  <div class="modal" id="batchModal" hidden>
+    <div class="modal-card">
+      <h2>批量添加 Profile</h2>
+      <div class="grid">
+        <label>名称前缀 <input id="bcPrefix" type="text" value="profile" /></label>
+        <label>模式
+          <select id="bcMode">
+            <option value="visible">可见窗口</option>
+            <option value="headless">无头（仅 API）</option>
+          </select>
+        </label>
+        <label>数量
+          <input id="bcCount" type="number" min="1" max="200" value="5" />
+          <span class="hint">多于代理条数时，代理循环分配</span>
+        </label>
+        <label>起始网址 <input id="bcStartUrl" type="text" placeholder="留空则用全局默认" /></label>
+      </div>
+      <label class="block">代理列表 <span class="muted small">一行一个，每行生成一个 profile；留空则全部跟随全局代理</span>
+        <textarea id="bcProxyList" rows="8" placeholder="1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;user:pass@1.2.3.4:8080&#10;socks5://1.2.3.4:1080"></textarea>
+      </label>
+      <div id="bcChoice" class="choice" hidden>
+        <p id="bcChoiceText"></p>
+        <div class="row">
+          <button class="primary" data-shortage="cycle">循环使用代理</button>
+          <button data-shortage="global">多出的跟随全局代理</button>
+          <button data-shortage="setGlobal" id="bcSetGlobal">设为全局代理，全部跟随</button>
+        </div>
+      </div>
+      <p class="error" id="batchModalError"></p>
+      <div class="row right">
+        <button data-close-modal="batchModal">取消</button>
+        <button class="primary" id="btnSaveBatch">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
