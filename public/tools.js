@@ -11,8 +11,10 @@ function updateTimer() {
   const timestamp = Date.now();
   const remaining = 30 - (timestamp % 30000) / 1000;
   $('totpCountdown').textContent = `${Math.ceil(remaining)} 秒后更新`;
-  $('totpProgress').value = remaining;
-  $('totpProgress').setAttribute('aria-valuetext', `${Math.ceil(remaining)} 秒后刷新`);
+  for (const progress of document.querySelectorAll('#accountsBody .totp-progress')) {
+    progress.value = remaining;
+    progress.setAttribute('aria-valuetext', `${Math.ceil(remaining)} 秒后刷新`);
+  }
   if (Math.floor(timestamp / 30000) !== codePeriod) updateCodes();
 }
 
@@ -43,7 +45,14 @@ function drawAccounts() {
     dataCell(row, entry.account);
     dataCell(row, entry.password);
     dataCell(row, entry.secret);
-    dataCell(row, codes[index] || '—', codes[index] || '');
+    const codeCell = dataCell(row, codes[index] || '—', codes[index] || '');
+    const progress = document.createElement('progress');
+    progress.className = 'totp-progress';
+    progress.max = 30;
+    progress.value = 30 - (Date.now() % 30000) / 1000;
+    progress.setAttribute('aria-label', `${entry.account} 的 TOTP 刷新剩余时间`);
+    progress.setAttribute('aria-valuetext', `${Math.ceil(progress.value)} 秒后刷新`);
+    codeCell.appendChild(progress);
   });
   $('accountsSummary').textContent = accounts.length ? `当前页面已解析 ${accounts.length} 条账号${importErrors.length ? `；跳过 ${importErrors.length} 行：${importErrors.join('；')}` : ''}` : '';
 }

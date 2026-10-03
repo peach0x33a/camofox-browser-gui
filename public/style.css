@@ -197,7 +197,7 @@ td.proxy { max-width: 320px; overflow: hidden; text-overflow: ellipsis; font-fam
 .tool-row label { flex: 1 1 260px; }
 .totp-code { font: 600 26px/1.2 ui-monospace, monospace; letter-spacing: 3px; }
 .totp-progress {
-  display: block; width: 100%; height: 4px; margin-top: 12px;
+  display: block; width: 100%; height: 3px; margin-top: 6px;
   border: 0; border-radius: 0; appearance: none;
   background: var(--line); color: var(--accent); accent-color: var(--accent);
 }
