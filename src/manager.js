@@ -18,7 +18,9 @@ import net from 'node:net';
 import path from 'node:path';
 
 import { camoufoxInstalled, isCamofoxDir, profileDataDir } from './paths.js';
+import { normalizeOpenUrl } from './store.js';
 import { describeProxy, proxyEnv } from './proxy.js';
+import { createProxyRelay } from './proxy-chain.js';
 
 const LOG_LIMIT = 500;
 const HEALTH_TIMEOUT_MS = 90_000;
@@ -60,9 +62,22 @@ async function fetchJson(url, { method = 'GET', body, timeoutMs = 10_000 } = {})
   return parsed;
 }
 
+/**
+ * A visible profile owns one browser window. Once its browser is disconnected
+ * or all pages are gone, keeping the node server alive only leaves a stale
+ * "running" row that can cause the upstream server to warm a new window.
+ */
+export function visibleWindowClosed(profile, browser, health) {
+  if (profile?.mode !== 'visible') return false;
+  if (browser?.browserConnected === false || browser?.browserRunning === false) return true;
+  if (health?.browserConnected === false || health?.browserRunning === false) return true;
+  return Number.isInteger(health?.activeTabs) && health.activeTabs === 0;
+}
+
 export class Manager extends EventEmitter {
   /** Ports claimed by in-flight or running launches (see #resolvePort). */
   #reservedPorts = new Set();
+  #healthPolling = false;
 
   constructor(store) {
     super();
@@ -91,6 +106,9 @@ export class Manager extends EventEmitter {
         // unreferenced (orphan) server process behind.
         launchSeq: 0,
         spawnError: '',
+        profile: null,
+        proxyRelay: null,
+        stopPromise: null,
       };
       this.runners.set(id, runner);
     }
@@ -134,7 +152,7 @@ export class Manager extends EventEmitter {
     this.emit('status', this.statusOf(id));
   }
 
-  #buildEnv(profile, port) {
+  #buildEnv(profile, port, launchProxy) {
     const env = {};
     // Start from the user's env (PATH/HOME/DISPLAY/XAUTHORITY are all needed)
     // but drop any camofox/proxy vars so the GUI is the only source of truth.
@@ -177,7 +195,7 @@ export class Manager extends EventEmitter {
       });
     }
 
-    Object.assign(env, proxyEnv(this.store.effectiveProxy(profile)));
+    Object.assign(env, proxyEnv(launchProxy));
     return env;
   }
 
@@ -216,12 +234,26 @@ export class Manager extends EventEmitter {
     if (port) this.#reservedPorts.delete(port);
   }
 
-  #spawnServer(profile, port, camofoxDir) {
-    const env = this.#buildEnv(profile, port);
+  #spawnServer(profile, port, camofoxDir, launchProxy, relay) {
+    const env = this.#buildEnv(profile, port, launchProxy);
     const proc = spawn(process.execPath, ['server.js'], {
       cwd: camofoxDir,
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    });
+    const closeRelay = () => {
+      relay?.close().catch(() => {});
+      const runner = this.runners.get(profile.id);
+      if (runner?.proxyRelay === relay) runner.proxyRelay = null;
+    };
+    proc.once('exit', closeRelay);
+    proc.once('error', closeRelay);
+    proc.on('message', (message) => {
+      const runner = this.runners.get(profile.id);
+      if (message?.type !== 'camofox-desktop-closed' || profile.mode !== 'visible' ||
+          runner?.proc !== proc || !['starting', 'running'].includes(runner.status)) return;
+      this.#log(profile.id, '浏览器窗口已关闭，正在停止实例');
+      this.stop(profile.id, { skipSessionClose: true }).catch((err) => this.#log(profile.id, err.message, 'error'));
     });
 
     const pipe = (stream, level) => {
@@ -275,7 +307,8 @@ export class Manager extends EventEmitter {
       if (runner.spawnError) throw new Error(runner.spawnError);
       if (proc.exitCode !== null || proc.signalCode) throw new Error('服务进程已退出');
       try {
-        const health = await fetchJson(`http://127.0.0.1:${port}/health`, { timeoutMs: 3000 });
+        const route = runner.profile?.mode === 'visible' ? '/desktop/status' : '/health';
+        const health = await fetchJson(`http://127.0.0.1:${port}${route}`, { timeoutMs: 3000 });
         if (health?.ok) return health;
       } catch { /* not up yet */ }
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -283,8 +316,17 @@ export class Manager extends EventEmitter {
     throw new Error('等待服务就绪超时');
   }
 
+  /**
+   * The desktop endpoint only observes state. Never call upstream /health for
+   * visible instances: it can schedule a relaunch between the two probes.
+   */
+  async #inspectVisibleWindow(profile, port) {
+    const health = await fetchJson(`http://127.0.0.1:${port}/desktop/status`, { timeoutMs: 3000 });
+    return { closed: health?.closed === true || visibleWindowClosed(profile, health, health), health };
+  }
+
   async start(id) {
-    const profile = this.store.getProfile(id);
+    const profile = structuredClone(this.store.getProfile(id));
     if (!profile) throw new Error('profile 不存在');
     const runner = this.runner(id);
     if (runner.status === 'starting' || runner.status === 'running' || runner.status === 'stopping') {
@@ -304,8 +346,18 @@ export class Manager extends EventEmitter {
         `或用 CAMOUFOX_EXECUTABLE 指定已有的 camoufox-bin 后重启 GUI`
       );
     }
+    if (profile.mode === 'visible') {
+      const pluginDir = path.join(camofoxDir, 'plugins', 'desktop');
+      let protocol;
+      try { protocol = JSON.parse(fs.readFileSync(path.join(pluginDir, 'plugin.json'), 'utf8')).guiProtocol; } catch {}
+      if (protocol !== 2 || !fs.existsSync(path.join(pluginDir, 'lifecycle.js')) ||
+          !fs.existsSync(path.join(pluginDir, 'window-size.js'))) {
+        throw new Error('请先运行 ./scripts/install-plugin.sh 更新 desktop 插件，再启动可见实例');
+      }
+    }
 
     const seq = ++runner.launchSeq;
+    runner.profile = structuredClone(profile); // edits apply to the next launch
     runner.spawnError = '';
     this.#setStatus(id, 'starting');
     runner.startedAt = nowIso();
@@ -321,16 +373,23 @@ export class Manager extends EventEmitter {
     // Tracked separately from runner.proc so the failure path always kills the
     // process *this* launch spawned, never a newer launch's process.
     let myProc = null;
+    let myRelay = null;
 
     try {
       const port = await this.#resolvePort(profile);
       abortIfSuperseded();
-      const proxy = this.store.effectiveProxy(profile);
+      const chain = this.store.effectiveProxyChain(profile);
+      const proxy = chain.at(-1) || null;
       const startUrl = this.store.effectiveStartUrl(profile);
+      if (chain.length > 1) {
+        myRelay = await createProxyRelay({ chain });
+        abortIfSuperseded();
+        runner.proxyRelay = myRelay;
+      }
 
       runner.port = port;
       this.#log(id, `启动 ${profile.name}｜端口 ${port}｜模式 ${profile.mode === 'visible' ? '可见窗口' : '无头'}`);
-      this.#log(id, `代理: ${proxy ? describeProxy(proxy) : '不使用代理'}`);
+      this.#log(id, `代理链路: ${chain.length ? chain.map((node) => describeProxy(node)).join(' → ') : '不使用代理'}`);
       if (profile.mode === 'visible' && !process.env.DISPLAY) {
         this.#log(id, '当前环境没有 DISPLAY，窗口将无法显示，会回退到无头模式', 'warn');
       }
@@ -338,7 +397,7 @@ export class Manager extends EventEmitter {
       // Re-check immediately before spawning: this is the last moment at which
       // aborting costs nothing.
       abortIfSuperseded();
-      const proc = this.#spawnServer(profile, port, camofoxDir);
+      const proc = this.#spawnServer(profile, port, camofoxDir, myRelay?.proxy || proxy, myRelay);
       myProc = proc;
       runner.proc = proc;
       runner.pid = proc.pid;
@@ -369,6 +428,8 @@ export class Manager extends EventEmitter {
       // Always reap the process this launch spawned, even when superseded --
       // otherwise it survives with nothing referencing it.
       await this.#killProcess(id, myProc, { silent: true });
+      await myRelay?.close();
+      if (runner.proxyRelay === myRelay) runner.proxyRelay = null;
       if (runner.proc === myProc) {
         runner.proc = null;
         runner.pid = null;
@@ -388,7 +449,7 @@ export class Manager extends EventEmitter {
 
   /** SIGTERM a specific process, escalating to SIGKILL. Safe on null/dead procs. */
   async #killProcess(id, proc, { silent = false } = {}) {
-    if (!proc || proc.exitCode !== null || proc.signalCode) return;
+    if (!proc || !proc.pid || proc.exitCode !== null || proc.signalCode) return;
     const exited = new Promise((resolve) => proc.once('exit', resolve));
     try {
       proc.kill('SIGTERM');
@@ -416,24 +477,52 @@ export class Manager extends EventEmitter {
     this.#releasePort(runner.port);
   }
 
-  async stop(id) {
-    const profile = this.store.getProfile(id);
+  async stop(id, { skipSessionClose = false } = {}) {
     const runner = this.runner(id);
+    if (runner.stopPromise) return runner.stopPromise;
+    runner.stopPromise = this.#stop(id, { skipSessionClose });
+    try { return await runner.stopPromise; }
+    finally { runner.stopPromise = null; }
+  }
+
+  async #stop(id, { skipSessionClose }) {
+    const runner = this.runner(id);
+    const profile = runner.profile || this.store.getProfile(id);
 
     // Cancel any in-flight start() -- without this a stop that lands before
     // the child is spawned is a no-op and the launch continues to completion.
     runner.launchSeq += 1;
 
     if (!runner.proc) {
+      await runner.proxyRelay?.close();
+      runner.proxyRelay = null;
       this.#setStatus(id, 'stopped');
       return this.statusOf(id);
     }
     this.#setStatus(id, 'stopping');
     this.#log(id, '正在停止…');
 
+    // A browser window may have been closed between health polls. Do not send
+    // a session request to an already-gone visible browser: the upstream
+    // recovery path may launch a replacement window just before we kill it.
+    let closeSession = !!profile && !skipSessionClose;
+    if (closeSession && profile.mode === 'visible') {
+      try {
+        const inspection = await this.#inspectVisibleWindow(profile, runner.port);
+        runner.health = inspection.health;
+        if (inspection.closed) {
+          closeSession = false;
+          this.#log(id, '浏览器窗口已关闭，跳过会话关闭请求', 'info');
+        }
+      } catch {
+        // A live server can briefly fail a probe while shutting down; retain
+        // the normal checkpoint request unless closure was confirmed.
+      }
+    }
+
     // Ask the server to close the session first so cookies/localStorage are
     // checkpointed by the persistence plugin before the process goes away.
-    if (profile) {
+    if (closeSession) {
       try {
         await fetchJson(`http://127.0.0.1:${runner.port}/sessions/${encodeURIComponent(profile.id)}`, {
           method: 'DELETE',
@@ -445,6 +534,8 @@ export class Manager extends EventEmitter {
     }
 
     await this.#kill(id);
+    await runner.proxyRelay?.close();
+    runner.proxyRelay = null;
     this.#setStatus(id, 'stopped');
     this.#log(id, '已停止');
     return this.statusOf(id);
@@ -456,8 +547,7 @@ export class Manager extends EventEmitter {
     if (!profile) throw new Error('profile 不存在');
     const runner = this.runner(id);
     if (runner.status !== 'running') throw new Error('该 profile 未在运行');
-    const target = String(url || '').trim() || this.store.effectiveStartUrl(profile);
-    if (!/^https?:\/\//i.test(target)) throw new Error('网址必须以 http:// 或 https:// 开头');
+    const target = normalizeOpenUrl(String(url || '').trim() || this.store.effectiveStartUrl(profile));
     const tab = await fetchJson(`http://127.0.0.1:${runner.port}/tabs`, {
       method: 'POST',
       timeoutMs: BROWSER_TIMEOUT_MS,
@@ -468,19 +558,44 @@ export class Manager extends EventEmitter {
   }
 
   async #pollHealth() {
-    for (const runner of this.runners.values()) {
-      if (runner.status !== 'running' || !runner.port) continue;
-      try {
-        const health = await fetchJson(`http://127.0.0.1:${runner.port}/health`, { timeoutMs: 3000 });
-        const previous = runner.health;
-        runner.health = health;
-        if (previous?.browserConnected !== health?.browserConnected) {
-          this.emit('status', this.statusOf(runner.id));
+    if (this.#healthPolling) return;
+    this.#healthPolling = true;
+    try {
+      for (const runner of this.runners.values()) {
+        if (runner.status !== 'running' || !runner.port) continue;
+        const profile = runner.profile || this.store.getProfile(runner.id);
+        const proc = runner.proc;
+        const seq = runner.launchSeq;
+        try {
+          let health;
+          let closed = false;
+          if (profile?.mode === 'visible') {
+            const inspection = await this.#inspectVisibleWindow(profile, runner.port);
+            health = inspection.health;
+            closed = inspection.closed;
+          } else {
+            health = await fetchJson(`http://127.0.0.1:${runner.port}/health`, { timeoutMs: 3000 });
+          }
+          if (runner.proc !== proc || runner.launchSeq !== seq || runner.status !== 'running') continue;
+          const previous = runner.health;
+          runner.health = health;
+          if (closed) {
+            this.#log(runner.id, '检测到浏览器窗口已关闭，正在销毁实例');
+            await this.stop(runner.id, { skipSessionClose: true });
+            continue;
+          }
+          if (previous?.browserConnected !== health?.browserConnected) {
+            this.emit('status', this.statusOf(runner.id));
+          }
+        } catch {
+          if (runner.proc !== proc || runner.launchSeq !== seq || runner.status !== 'running') continue;
+          if (runner.health !== null) {
+            runner.health = null;
+            this.emit('status', this.statusOf(runner.id));
+          }
         }
-      } catch {
-        runner.health = null;
       }
-    }
+    } finally { this.#healthPolling = false; }
   }
 
   async stopAll() {

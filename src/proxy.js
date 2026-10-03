@@ -212,16 +212,17 @@ function guard(socket, timeoutMs, reject, label = '') {
 }
 
 /** Open a raw TCP tunnel to target through an HTTP/HTTPS proxy (CONNECT). */
-function connectViaHttp(p, targetHost, targetPort, timeoutMs) {
+function connectViaHttp(p, targetHost, targetPort, timeoutMs, transport, onSocket, tlsOptions = {}) {
   return new Promise((resolve, reject) => {
     const socket = p.scheme === 'https'
-      ? tls.connect({ host: p.host, port: Number(p.port), servername: p.host, rejectUnauthorized: false })
-      : net.connect({ host: p.host, port: Number(p.port) });
+      ? tls.connect({ ...tlsOptions, ...(transport ? { socket: transport } : { host: p.host, port: Number(p.port) }), servername: net.isIP(p.host) ? undefined : p.host })
+      : transport || net.connect({ host: p.host, port: Number(p.port) });
+    onSocket?.(socket);
 
     const done = guard(socket, timeoutMs, reject, '代理握手');
     socket.once('error', reject);
 
-    socket.once(p.scheme === 'https' ? 'secureConnect' : 'connect', () => {
+    const sendConnect = () => {
       const auth = p.username
         ? `Proxy-Authorization: Basic ${Buffer.from(`${p.username}:${p.password}`).toString('base64')}\r\n`
         : '';
@@ -231,7 +232,9 @@ function connectViaHttp(p, targetHost, targetPort, timeoutMs) {
         auth +
         `Proxy-Connection: keep-alive\r\n\r\n`
       );
-    });
+    };
+    if (transport && p.scheme === 'http') queueMicrotask(sendConnect);
+    else socket.once(p.scheme === 'https' ? 'secureConnect' : 'connect', sendConnect);
 
     let buffer = Buffer.alloc(0);
     const onData = (chunk) => {
@@ -260,31 +263,43 @@ function connectViaHttp(p, targetHost, targetPort, timeoutMs) {
       resolve(socket);
     };
     socket.on('data', onData);
+    socket.resume();
   });
 }
 
 /** Minimal SOCKS5 client: greeting, optional user/pass auth, CONNECT by domain. */
-function connectViaSocks5(p, targetHost, targetPort, timeoutMs) {
+function connectViaSocks5(p, targetHost, targetPort, timeoutMs, transport, onSocket) {
   return new Promise((resolve, reject) => {
-    const socket = net.connect({ host: p.host, port: Number(p.port) });
+    const socket = transport || net.connect({ host: p.host, port: Number(p.port) });
+    socket.pause();
+    onSocket?.(socket);
     const done = guard(socket, timeoutMs, reject, 'SOCKS5 握手');
     socket.once('error', reject);
 
     const readExactly = (length) => new Promise((resolveRead, rejectRead) => {
+      const cleanup = () => {
+        socket.off('readable', attempt);
+        socket.off('error', fail);
+        socket.off('close', closed);
+        socket.off('end', closed);
+      };
+      const fail = (error) => { cleanup(); rejectRead(error); };
+      const closed = () => fail(new Error('SOCKS5 连接被对端关闭'));
       const attempt = () => {
         const chunk = socket.read(length);
         if (chunk) {
+          cleanup();
           resolveRead(chunk);
-          return;
         }
-        socket.once('readable', attempt);
       };
-      socket.once('error', rejectRead);
-      socket.once('close', () => rejectRead(new Error('SOCKS5 连接被对端关闭')));
+      socket.on('readable', attempt);
+      socket.once('error', fail);
+      socket.once('close', closed);
+      socket.once('end', closed);
       attempt();
     });
 
-    socket.once('connect', async () => {
+    const handshake = async () => {
       try {
         const methods = p.username ? [0x00, 0x02] : [0x00];
         socket.write(Buffer.from([0x05, methods.length, ...methods]));
@@ -294,6 +309,7 @@ function connectViaSocks5(p, targetHost, targetPort, timeoutMs) {
           if (!p.username) throw new Error('代理要求账号密码认证');
           const user = Buffer.from(p.username);
           const pass = Buffer.from(p.password || '');
+          if (user.length > 255 || pass.length > 255) throw new Error('SOCKS5 账号密码最多 255 字节');
           socket.write(Buffer.concat([
             Buffer.from([0x01, user.length]), user,
             Buffer.from([pass.length]), pass,
@@ -305,6 +321,7 @@ function connectViaSocks5(p, targetHost, targetPort, timeoutMs) {
         }
 
         const host = Buffer.from(targetHost);
+        if (host.length > 255) throw new Error('SOCKS5 目标地址过长');
         const request = Buffer.concat([
           Buffer.from([0x05, 0x01, 0x00, 0x03, host.length]), host,
           Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff]),
@@ -322,8 +339,42 @@ function connectViaSocks5(p, targetHost, targetPort, timeoutMs) {
         socket.destroy();
         reject(err);
       }
-    });
+    };
+    if (transport) queueMicrotask(handshake);
+    else socket.once('connect', handshake);
   });
+}
+
+/** Build the complete route; a failed hop never falls back to a direct connection. */
+export async function openProxyTunnel(proxy, host, port, { upstreamProxy = null, chain = null, timeoutMs = 10000, onSocket, tlsOptions } = {}) {
+  if (upstreamProxy?.enabled === true) {
+    const error = validateProxy(upstreamProxy);
+    if (error) throw new Error('前置代理 ' + error);
+  }
+  const route = chain === null
+    ? [upstreamProxy, proxy].filter(hasProxy).map(normalizeProxy)
+    : chain.map(normalizeProxy);
+  if (!route.length) throw new Error('没有配置代理');
+  for (const p of route) {
+    const error = validateProxy(p);
+    if (error) throw new Error(error);
+  }
+  const sockets = new Set();
+  const track = (socket) => { sockets.add(socket); onSocket?.(socket); };
+  const tunnel = (p, target, targetPort, socket) => (p.scheme === 'socks5' ? connectViaSocks5 : connectViaHttp)(
+    p, target, targetPort, timeoutMs, socket, track, tlsOptions,
+  );
+  try {
+    let transport;
+    for (let index = 0; index < route.length; index += 1) {
+      const next = route[index + 1];
+      transport = await tunnel(route[index], next?.host || host, next ? Number(next.port) : port, transport);
+    }
+    return transport;
+  } catch (err) {
+    for (const socket of sockets) socket.destroy();
+    throw err;
+  }
 }
 
 /**
@@ -356,12 +407,10 @@ function extractIp(body) {
   return { ip: payload.match(IPV4)?.[1] || '', country: '' };
 }
 
-async function fetchIpThrough(p, target, timeoutMs) {
+async function fetchIpThrough(p, target, timeoutMs, upstreamProxy, chain) {
   let socket = null;
   try {
-    socket = p.scheme === 'socks5'
-      ? await connectViaSocks5(p, target.host, 443, timeoutMs)
-      : await connectViaHttp(p, target.host, 443, timeoutMs);
+    socket = await openProxyTunnel(p, target.host, 443, { upstreamProxy, chain, timeoutMs });
 
     const body = await new Promise((resolve, reject) => {
       const secure = tls.connect({ socket, servername: target.host }, () => {
@@ -391,9 +440,11 @@ async function fetchIpThrough(p, target, timeoutMs) {
  * Tries each echo target in turn; the first one that answers wins.
  * @returns {Promise<{ok: boolean, ip?: string, via?: string, latencyMs?: number, error?: string}>}
  */
-export async function testProxy(proxy, { timeoutMs = 10000, targets = IP_ECHO_TARGETS } = {}) {
+export async function testProxy(proxy, { timeoutMs = 10000, targets = IP_ECHO_TARGETS, upstreamProxy = null, chain = null } = {}) {
   const p = normalizeProxy(proxy);
-  const invalid = validateProxy(p);
+  const invalid = chain === null
+    ? validateProxy(hasProxy(p) ? p : upstreamProxy)
+    : chain.length ? chain.map(validateProxy).find(Boolean) : '没有配置代理';
   if (invalid) return { ok: false, error: invalid };
 
   const startedAt = Date.now();
@@ -403,7 +454,7 @@ export async function testProxy(proxy, { timeoutMs = 10000, targets = IP_ECHO_TA
     // earlier unreachable ones would report a latency many times the real one.
     const attemptStartedAt = Date.now();
     try {
-      const { ip, country } = await fetchIpThrough(p, target, timeoutMs);
+      const { ip, country } = await fetchIpThrough(p, target, timeoutMs, upstreamProxy, chain);
       if (ip) {
         return {
           ok: true,

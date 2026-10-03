@@ -1,12 +1,14 @@
 # camofox-gui
 
-[camofox-browser](https://github.com/jo-inc/camofox-browser) 的本地图形控制台：在界面里维护一组 HTTPS 代理、单个或批量创建 profile，点一下就启动一个带独立指纹与独立代理的浏览器窗口。
+[camofox-browser](https://github.com/jo-inc/camofox-browser) 的本地图形控制台：维护可组合的代理节点、单个或批量创建 profile，点一下就启动一个带独立指纹与独立代理链路的浏览器窗口。
 
 > A local control panel for camofox-browser — per-profile HTTPS proxies, batch profile creation, one-click launch. Zero dependencies, Node stdlib only.
 
-![camofox-gui 主界面](docs/screenshot.png)
+![代理链路面板示例](docs/proxy-chain.png)
 
 零依赖 —— 只用 Node 标准库，不需要 `npm install`。
+
+控制台以 **Profiles** 为默认标签，可切换到「代理节点」「代理链路」「通用工具」「全局设置」「运行日志」；页面内容采用无圆角卡片的平面布局。
 
 ```bash
 ./start.sh              # 默认 http://127.0.0.1:8790，自动打开浏览器
@@ -15,15 +17,17 @@
 
 ## 能做什么
 
-- **代理池** —— 保存多个 HTTPS / SOCKS5 代理，下拉切换当前生效的那个。粘贴一次可以加一批，密码在界面上一律打码。
-- **每个 profile 独立代理** —— 可选「跟随全局 / 独立代理 / 不使用代理」，互不干扰。
+- **代理节点** —— 在独立标签保存或批量导入 HTTP / HTTPS / SOCKS5 节点，管理地址、凭据及是否展示在实例列表。
+- **代理链路** —— 独立创建并命名链路，按本机到出口顺序添加节点或已有链路，支持嵌套、调整顺序、测试。展开后最多 32 个节点；失败不会回退直连。
+- **展示与复制** —— 节点和链路各自设置是否展示在实例列表。隐藏的节点或链路仍可用作链路组件；已被实例选中的项目需先切换实例才能隐藏或删除。节点或链路可指定数量批量复制，链路复制保留组件引用。
+- **实例选择** —— 新建、编辑和批量创建只选择展示的节点或链路，也可不使用代理。支持粘贴节点地址，代理密码在界面上一律打码。修改运行中的配置需重启实例生效。
 - **代理测试** —— 通过代理建真实 HTTPS 隧道，返回出口 IP、国家和延迟。
-- **批量创建** —— 粘贴一份代理列表一行生成一个 profile；代理条数不够时会问你是循环使用、还是让多出的跟随全局。
+- **批量创建** —— 指定数量和展示的节点或链路，批量生成使用同一代理配置的 profile。
+- **通用工具** —— 计算 Base32 密钥的六位 TOTP，底部进度条显示本轮验证码剩余时间；“账号清单解析”从每行 `账号----密码----2FA密钥` 提取账号、密码、密钥和动态验证码，各列可复制。内容仅在当前页面内存中，不存入配置。
+- **网址预设** —— 点击实例的“打开网址”，可输入 `chatgpt.com` 这样的域名并保存为所有实例共用的预设；未写协议时使用 HTTPS。
 - **一键启动** —— 可见窗口模式下浏览器窗口直接出现在桌面上，可以手动登录、过验证码；无头模式则只跑服务，给出该实例的 REST API 入口供脚本调用。
 - **会话隔离** —— 每个 profile 的 cookie / localStorage / 登录态存在各自目录，由 camofox-browser 的 persistence 插件负责落盘。
 - **实时日志** —— 每个 profile 的 server 输出通过 SSE 推到界面。
-
-![代理池](docs/proxy-pool.png)
 
 ## 为什么是「一个 profile 一个进程」
 
@@ -37,7 +41,7 @@ camofox-gui (8790)
 └─ ...
 ```
 
-启动流程：`spawn server.js` → 等 `/health` → `POST /start` 预热 Camoufox → `POST /tabs` 打开起始网址。
+启动流程：多节点链路先创建本地代理转发器 → `spawn server.js` → 等服务就绪 → `POST /start` → `POST /tabs`。单节点直接连接代理。可见模式通过只读 `/desktop/status` 检查状态；无头模式使用 `/health`。转发器随实例退出关闭，不写入固定端口配置。
 
 ## 准备工作
 
@@ -71,7 +75,11 @@ Linux 上 camofox-browser 总是把 Camoufox 渲染到一块临时 Xvfb 虚拟�
 
 `scripts/install-plugin.sh` 会把它复制到 camofox-browser 的 `plugins/desktop/` 并在 `camofox.config.json` 里注册
 （原文件自动备份，可重复执行）。插件默认是**惰性的**：不设置 `CAMOFOX_DESKTOP_*` 环境变量时什么都不做，
-所以不影响 camofox-browser 的原有行为。GUI 只在「可见窗口」模式下才会设置这些变量。
+所以不影响 camofox-browser 的原有行为。GUI 的可见模式会启用桌面生命周期管理；HTTPS / SOCKS5 原始代理注入在无头模式也可生效。
+
+可见模式将新窗口约束到当前 X 显示尺寸内，在现有页面执行无副作用的后台探活，不额外新建空白窗口。最后一个页面关闭或浏览器断开后，插件立即禁止自动重新拉起，并通过 IPC 通知 GUI 停止服务。GUI 定期读取被动状态作为兜底，不调用可能触发自动恢复的 `/health`。
+
+**升级后先执行 `./scripts/install-plugin.sh`，再重启 GUI 和实例。** 可见模式会检查插件版本，旧插件需更新后才能启动。插件对上游无参数 `browser.newContext()` 的健康探测做兼容适配；升级 camofox-browser 后应重新运行浏览器集成验证。
 
 KDE / Wayland 下 Camoufox 走 Wayland 后端，窗口由 KWin 管理，`wmctrl`/`xwininfo` 这类 X11 工具列不出来，
 但窗口确实在桌面上（`kdotool search` 能看到 class 为 `camoufox` 的窗口）。
@@ -104,7 +112,7 @@ curl -L --retry 5 -C - -o /tmp/camoufox.zip \
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/.camofox-gui/config.json` | 全局设置、代理池、profile 列表（代理密码明文存储） |
+| `~/.camofox-gui/config.json` | 全局设置、代理节点、独立链路、网址预设与 profile 列表（代理密码明文存储） |
 | `~/.camofox-gui/profiles/<id>/profile` | 该 profile 的 storage state（cookie / localStorage） |
 | `~/.camofox-gui/profiles/<id>/cookies` | 导入的 cookie 文件 |
 | `~/.camofox-gui/gui.lock` | 实例锁，防止两个 GUI 共用同一数据目录 |
@@ -115,12 +123,12 @@ curl -L --retry 5 -C - -o /tmp/camoufox.zip \
 
 - 服务只监听 `127.0.0.1`，并拒绝跨源请求；不要把它暴露到公网。
 - 代理密码在磁盘上是明文（启动浏览器需要），但界面和 API 响应里一律是 `••••••`。
+- 旧版的全局、独立和实例前置代理配置会迁移为节点及显式链路；原有实例的链路选择会保留。代理链路不替代内核/GeoIP 下载使用的系统 `http_proxy` / `https_proxy`。
 - 「可见窗口」模式下 GUI 会把 server 的会话/标签页回收超时调到 7 天，避免你正在手动操作时窗口被当成空闲回收。
   无头模式保持 camofox-browser 的默认值（标签页闲置 5 分钟回收）。
-- `http` 协议的代理走 camofox-browser 原生代理池，能顺带拿到基于出口 IP 的时区/语言伪装；
-  `https` 与 `socks5` 走 desktop 插件直接注入，**不会**做 GeoIP 伪装。
+- **单节点时**，`http` 代理走 camofox-browser 原生代理池；`https` 与 `socks5` 走 desktop 插件直接注入。**多节点时**，浏览器使用每次启动创建的本地 HTTP 转发器；GeoIP 行为以该 HTTP 代理路径为准。
 - 批量启动是串行的：同时拉起多个 Camoufox 既吃内存，也更容易触发风控。批量启动途中点「停止全部」会取消剩余队列。
-- 手动关掉浏览器窗口后 server 仍在运行，点「打开网址」会在同一个 profile 会话里重新拉起窗口。
+- 手动关闭最后一个浏览器页面后，该实例自动停止；重新打开需点击「启动」。服务不会为了探活或自动恢复再闪现一个窗口。无头模式保留上游恢复行为。
 - 代理测试依次尝试 `www.cloudflare.com/cdn-cgi/trace` → `ipinfo.io` → `api.ipify.org` → `ifconfig.me`，
   任意一个通就算通过。单一测试点在国内线路上经常误报。
 
@@ -134,6 +142,19 @@ curl -L --retry 5 -C - -o /tmp/camoufox.zip \
 
 环境变量：`CAMOFOX_GUI_DATA_DIR` 改数据目录，`CAMOFOX_DIR` 指定 camofox-browser 位置，
 `CAMOUFOX_EXECUTABLE` 指定已有的 Camoufox 二进制。
+
+## 验证
+
+`npm test` 运行纯本地测试：代理链协议组合、四跳传输、嵌套链路的环路与依赖、复制和配置迁移、失败不直连、转发器回收、实例进程生命周期、被动探活和密码回填。测试使用临时数据目录，自签名证书仅用于本地 fixture。
+
+`xvfb-run -a node scripts/verify-browser.mjs` 使用同级 camofox-browser 的 Playwright / Camoufox 依赖验证真实浏览器：链路新建/嵌套/复制、实例选择、网址预设、TOTP 与账号解析、桌面及手机布局、代理链访问、窗口尺寸、可见窗口探活与最后一页关闭。需已安装 Camoufox 内核和 Chromium；截图输出到 `.impeccable/review/`，不会操作已有实例。
+
+默认使用同级 Playwright 对应的 Chromium 构建。若该构建未安装，可通过可选环境变量 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定本机已有的 Chromium 可执行文件，例如（路径请按实际安装位置调整）：
+
+```bash
+PLAYWRIGHT_CHROMIUM_EXECUTABLE="$HOME/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome" \
+  xvfb-run -a node scripts/verify-browser.mjs
+```
 
 ## 目录结构
 

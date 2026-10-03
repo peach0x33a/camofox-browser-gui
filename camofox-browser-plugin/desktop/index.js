@@ -26,6 +26,9 @@
  */
 
 import fs from 'node:fs';
+import { installVisibleLifecycle } from './lifecycle.js';
+import { fitWindowToDisplay, readDisplaySize } from './window-size.js';
+export { installVisibleLifecycle } from './lifecycle.js';
 
 function envFlag(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
@@ -72,6 +75,7 @@ export async function register(app, ctx, pluginConfig = {}) {
   // --- 1. Visible window on the host display ---
   const wantsHostDisplay = envFlag(env.CAMOFOX_DESKTOP_DISPLAY) || pluginConfig.hostDisplay === true;
   if (wantsHostDisplay) {
+    installVisibleLifecycle(app, ctx);
     const display = resolveHostDisplay(env);
     if (!display) {
       log('warn', 'desktop plugin: no usable X display, keeping Xvfb', {
@@ -83,6 +87,12 @@ export async function register(app, ctx, pluginConfig = {}) {
       ctx.createVirtualDisplay = () => ({
         get: async () => display,
         kill: () => {},
+      });
+      events.on('browser:launching', ({ options }) => {
+        const screen = readDisplaySize(display);
+        const size = fitWindowToDisplay(options, screen);
+        if (size) log('info', 'desktop plugin: visible window size', { display, screen, window: size });
+        else log('warn', 'desktop plugin: could not constrain window to display', { display, screen });
       });
       log('info', 'desktop plugin: rendering on host display', { display });
     }

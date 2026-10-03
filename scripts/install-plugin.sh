@@ -21,6 +21,8 @@ echo "目标: $TARGET"
 
 mkdir -p "$TARGET/plugins/desktop"
 cp "$HERE/camofox-browser-plugin/desktop/index.js" "$TARGET/plugins/desktop/index.js"
+cp "$HERE/camofox-browser-plugin/desktop/lifecycle.js" "$TARGET/plugins/desktop/lifecycle.js"
+cp "$HERE/camofox-browser-plugin/desktop/window-size.js" "$TARGET/plugins/desktop/window-size.js"
 cp "$HERE/camofox-browser-plugin/desktop/plugin.json" "$TARGET/plugins/desktop/plugin.json"
 echo "  ✓ 已复制 plugins/desktop/"
 
@@ -52,4 +54,4 @@ NODE
 
 echo
 echo "完成。插件在没有 CAMOFOX_DESKTOP_* 环境变量时不做任何事，"
-echo "不会改变 camofox-browser 的原有行为；只有 GUI 以「可见窗口」模式启动 profile 时才会激活。"
+echo "可见模式启用桌面生命周期管理；原始代理注入也支持无头模式。请重启 GUI 和实例。"

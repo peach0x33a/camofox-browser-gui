@@ -51,10 +51,15 @@ export function createApi({ store, manager }) {
   manager.on('log-reset', (event) => broadcast('logreset', event));
 
   function profileView(profile) {
+    const route = store.effectiveProxyChain(profile);
     return {
       ...profile,
       proxy: { ...profile.proxy, password: profile.proxy.password ? PASSWORD_PLACEHOLDER : '' },
-      proxyLabel: describeProxy(store.effectiveProxy(profile)) || '不使用代理',
+      upstreamProxy: { ...profile.upstreamProxy, password: profile.upstreamProxy?.password ? PASSWORD_PLACEHOLDER : '' },
+      upstreamProxyLabel: profile.upstreamProxy?.enabled ? describeProxy(profile.upstreamProxy) : '',
+      proxyLabel: ['node', 'chain'].includes(profile.proxyMode)
+        ? (route.map((p) => p.name || describeProxy(p)).join(' → ') || '不使用代理')
+        : describeProxy(store.effectiveProxy(profile)) || '不使用代理',
       effectiveStartUrl: store.effectiveStartUrl(profile),
     };
   }
@@ -69,13 +74,17 @@ export function createApi({ store, manager }) {
         // rendered, and edits send back the placeholder when left untouched.
         proxies: settings.proxies.map((p) => ({
           id: p.id,
+          name: p.name,
+          showInList: p.showInList,
           scheme: p.scheme,
           host: p.host,
           port: p.port,
           username: p.username,
           password: p.password ? PASSWORD_PLACEHOLDER : '',
           label: describeProxy(p),
+          route: [p.name],
         })),
+        chains: settings.chains.map((c) => ({ ...c, items: c.items.map((item) => ({ ...item })), route: store.resolveChain(c.id).map((node) => node.name) })),
       },
       proxyConfigured: !!active,
       profiles: store.profiles.map(profileView),
@@ -117,8 +126,21 @@ export function createApi({ store, manager }) {
       return state();
     }],
 
-    // --- saved proxy pool ---
+    ['POST', /^\/api\/url-presets$/, async (req, res, match, body) => {
+      const url = store.addUrlPreset(body.url);
+      return { url, state: state() };
+    }],
+    ['DELETE', /^\/api\/url-presets$/, async (req, res, match, body, requestUrl) => {
+      store.removeUrlPreset(requestUrl.searchParams.get('url'));
+      return { state: state() };
+    }],
+
+    // --- saved proxy nodes ---
     ['POST', /^\/api\/proxies$/, async (req, res, match, body) => {
+      if (body.node) {
+        store.addProxyNode(body.node);
+        return { state: state() };
+      }
       // Accepts a pasted list ("一行一个") and/or a single structured proxy.
       const inputs = [];
       const { proxies: parsed, errors } = parseProxyList(body.list || '');
@@ -136,8 +158,14 @@ export function createApi({ store, manager }) {
       const id = match[1];
       const current = store.settings.proxies.find((p) => p.id === id);
       if (!current) throw new Error('代理不存在');
-      store.updateProxy(id, mergeProxy(body.proxy ?? body, current));
+      const input = body.proxy ? { ...body, ...body.proxy } : body;
+      store.updateProxy(id, { ...input, ...mergeProxy({ ...current, ...input }, current) });
       return { state: state() };
+    }],
+
+    ['POST', /^\/api\/proxies\/([\w-]+)\/copy$/, async (req, res, match, body) => {
+      const created = store.copyProxy(match[1], body.count);
+      return { created: created.length, state: state() };
     }],
 
     ['DELETE', /^\/api\/proxies\/([\w-]+)$/, async (req, res, match) => {
@@ -145,18 +173,42 @@ export function createApi({ store, manager }) {
       return { state: state() };
     }],
 
+    ['POST', /^\/api\/chains$/, async (req, res, match, body) => {
+      store.addChain(body);
+      return { state: state() };
+    }],
+    ['PATCH', /^\/api\/chains\/([\w-]+)$/, async (req, res, match, body) => {
+      store.updateChain(match[1], body);
+      return { state: state() };
+    }],
+    ['DELETE', /^\/api\/chains\/([\w-]+)$/, async (req, res, match) => {
+      store.deleteChain(match[1]);
+      return { state: state() };
+    }],
+    ['POST', /^\/api\/chains\/([\w-]+)\/copy$/, async (req, res, match, body) => {
+      const created = store.copyChain(match[1], body.count);
+      return { created: created.length, state: state() };
+    }],
+
     ['POST', /^\/api\/proxy\/test$/, async (req, res, match, body) => {
       let proxy;
+      let upstreamProxy = null;
+      let chain = null;
       if (body.profileId) {
         const profile = store.getProfile(body.profileId);
         if (!profile) throw new Error('profile 不存在');
         proxy = store.effectiveProxy(profile);
-        if (!proxy) return { ok: false, error: '该 profile 未配置代理' };
+        upstreamProxy = profile.upstreamProxy?.enabled ? profile.upstreamProxy : null;
+        chain = store.effectiveProxyChain(profile);
+        if (!chain.length) return { ok: false, error: '该 profile 未配置代理' };
+      } else if (body.chainId || body.proxyId) {
+        chain = body.chainId ? store.resolveChain(body.chainId) : store.resolveProxyChain(body.proxyId);
+        proxy = chain.at(-1);
       } else {
         proxy = resolveProxyInput(body);
       }
-      if (!proxy?.host) return { ok: false, error: '没有选中任何代理' };
-      const result = await testProxy(proxy);
+      if (!proxy?.host && !upstreamProxy?.host) return { ok: false, error: '没有选中任何代理' };
+      const result = await testProxy(proxy, { upstreamProxy, chain });
       return { ...result, proxyLabel: describeProxy(proxy) };
     }],
 
@@ -170,8 +222,11 @@ export function createApi({ store, manager }) {
       const profile = store.createProfile({
         name: body.name,
         mode: MODES.includes(body.mode) ? body.mode : undefined,
-        proxyMode: PROXY_MODES.includes(body.proxyMode) ? body.proxyMode : 'global',
+        proxyMode: body.proxyChainId ? 'chain' : body.proxyNodeId ? 'node' : body.proxyMode === 'none' ? 'none' : PROXY_MODES.includes(body.proxyMode) ? body.proxyMode : 'none',
+        proxyNodeId: body.proxyNodeId,
+        proxyChainId: body.proxyChainId,
         proxy: normalizeProxy(body.proxy),
+        upstreamProxy: body.upstreamProxy,
         startUrl: body.startUrl,
         note: body.note,
         // The new-profile dialog has a port field; honour it instead of always
@@ -182,6 +237,18 @@ export function createApi({ store, manager }) {
     }],
 
     ['POST', /^\/api\/profiles\/batch$/, async (req, res, match, body) => {
+      if (body.proxyNodeId !== undefined || body.proxyChainId !== undefined) {
+        const count = Number(body.count);
+        if (!Number.isInteger(count) || count < 1 || count > 200) throw new Error('数量需在 1-200 之间');
+        const created = store.createProfiles(Array.from({ length: count }, (_, index) => ({
+          name: `${String(body.prefix || 'profile').trim() || 'profile'}-${index + 1}`,
+          mode: MODES.includes(body.mode) ? body.mode : store.settings.defaultMode,
+          startUrl: body.startUrl,
+          proxyMode: body.proxyChainId ? 'chain' : body.proxyNodeId ? 'node' : 'none',
+          proxyNodeId: body.proxyNodeId, proxyChainId: body.proxyChainId,
+        })));
+        return { created: created.length, errors: [], note: '', state: state() };
+      }
       const prefix = String(body.prefix || 'profile').trim() || 'profile';
       const mode = MODES.includes(body.mode) ? body.mode : store.settings.defaultMode;
       const startUrl = String(body.startUrl || '').trim();
@@ -262,6 +329,7 @@ export function createApi({ store, manager }) {
       if (!current) throw new Error('profile 不存在');
       const patch = { ...body };
       if (patch.proxy !== undefined) patch.proxy = mergeProxy(patch.proxy, current.proxy);
+      if (patch.upstreamProxy !== undefined) patch.upstreamProxy = mergeProxy(patch.upstreamProxy, current.upstreamProxy);
       const profile = store.updateProfile(id, patch);
       return { profile: profileView(profile), state: state() };
     }],

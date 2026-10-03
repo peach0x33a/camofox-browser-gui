@@ -16,6 +16,7 @@ let selected = new Set();
 let logFilter = '';
 const logs = new Map();
 let editingId = null;
+let openUrlProfileId = null;
 let settingsRendered = false;
 
 // ---------------------------------------------------------------------------
@@ -61,27 +62,7 @@ function renderSettings() {
   $('setStartUrl').value = s.startUrl || '';
   $('setDefaultMode').value = s.defaultMode || 'visible';
   $('camofoxDirLabel').textContent = s.camofoxDir || '未检测到 camofox-browser 目录，请在全局设置里填写';
-  renderProxySelect();
   settingsRendered = true;
-}
-
-/** The saved-proxy dropdown. Labels are pre-masked by the server. */
-function renderProxySelect() {
-  const select = $('setProxySelect');
-  const proxies = state.settings?.proxies || [];
-  select.textContent = '';
-  select.appendChild(new Option(proxies.length ? '不使用全局代理' : '还没有保存任何代理，点「+ 添加」', ''));
-  for (const proxy of proxies) select.appendChild(new Option(proxy.label, proxy.id));
-  select.value = state.settings?.proxyId || '';
-  const none = !select.value;
-  $('btnProxyEdit').disabled = none;
-  $('btnProxyDelete').disabled = none;
-  $('btnTestProxy').disabled = none;
-}
-
-function selectedProxy() {
-  const id = $('setProxySelect').value;
-  return (state.settings?.proxies || []).find((p) => p.id === id) || null;
 }
 
 async function saveSettings() {
@@ -91,7 +72,6 @@ async function saveSettings() {
       basePort: Number($('setBasePort').value),
       startUrl: $('setStartUrl').value.trim(),
       defaultMode: $('setDefaultMode').value,
-      proxyId: $('setProxySelect').value,
     });
     state = data;
     renderSettings();
@@ -102,54 +82,218 @@ async function saveSettings() {
   }
 }
 
-async function testProxy() {
-  const button = $('btnTestProxy');
+async function testProxy(id, button, type = 'node') {
   const output = $('proxyTestResult');
-  const proxy = selectedProxy();
-  if (!proxy) return toast('请先选择一个代理', 'err');
+  const proxy = (type === 'chain' ? state.settings.chains : state.settings.proxies).find((p) => p.id === id);
+  if (!proxy) return;
   button.disabled = true;
-  output.textContent = `测试中… ${proxy.label}`;
+  output.textContent = `测试中… ${proxy.route.join(' → ')}`;
   output.className = 'muted small result-line';
   try {
-    const result = await api('POST', '/api/proxy/test', { proxyId: proxy.id });
+    const result = await api('POST', '/api/proxy/test', { [type === 'chain' ? 'chainId' : 'proxyId']: proxy.id });
     if (result.ok) {
       const where = result.country ? ` ${result.country}` : '';
-      output.textContent = `✅ 通畅，出口 IP ${result.ip}${where}（${result.latencyMs}ms，经 ${result.via}）`;
+      output.textContent = `通畅，出口 IP ${result.ip}${where}（${result.latencyMs}ms，经 ${result.via}）`;
       output.className = 'small result-line';
     } else {
-      output.textContent = `❌ ${result.error}`;
+      output.textContent = result.error;
       output.className = 'error result-line';
     }
   } catch (err) {
-    output.textContent = `❌ ${err.message}`;
+    output.textContent = err.message;
     output.className = 'error result-line';
   } finally {
     button.disabled = false;
   }
 }
 
-// --- proxy pool management ---
+// --- proxy nodes and chains ---
 
 let editingProxyId = null;
+let editingChainId = null;
+let chainDraft = [];
+let copying = null;
+
+function renderProxyNodes() {
+  const nodes = state.settings?.proxies || [];
+  const body = $('proxyBody');
+  body.textContent = '';
+  $('proxyCount').textContent = nodes.length ? `共 ${nodes.length} 个节点` : '';
+  $('proxyEmpty').hidden = nodes.length > 0;
+  for (const node of nodes) {
+    const row = document.createElement('tr');
+    const name = cell(document.createTextNode(node.name)); name.dataset.label = '节点'; row.appendChild(name);
+    const endpoint = cell(document.createTextNode(node.label)); endpoint.className = 'proxy'; endpoint.dataset.label = '代理地址'; row.appendChild(endpoint);
+    const visible = document.createElement('input');
+    visible.type = 'checkbox'; visible.checked = node.showInList;
+    visible.setAttribute('aria-label', `${node.name} 展示在实例列表`);
+    visible.addEventListener('change', async () => {
+      visible.disabled = true;
+      try {
+        const data = await api('PATCH', `/api/proxies/${node.id}`, { showInList: visible.checked });
+        state = data.state; renderProxyNodes(); renderTable();
+      } catch (err) { visible.checked = node.showInList; toast(err.message, 'err'); }
+      finally { visible.disabled = false; }
+    });
+    const visibilityCell = cell(visible); visibilityCell.dataset.label = '实例列表'; row.appendChild(visibilityCell);
+    const actions = document.createElement('div'); actions.className = 'actions';
+    actions.appendChild(button('编辑', 'mini', false, () => openProxyModal(node.id)));
+    actions.appendChild(button('复制', 'mini', false, () => openCopyModal('proxies', node)));
+    actions.appendChild(button('删除', 'danger mini', false, () => deleteProxy(node.id)));
+    const actionCell = cell(actions); actionCell.dataset.label = '操作'; row.appendChild(actionCell); body.appendChild(row);
+  }
+  renderProxyChains();
+}
+
+function renderProxyChains() {
+  const chains = state.settings?.chains || [];
+  const body = $('chainBody');
+  body.textContent = '';
+  $('chainCount').textContent = chains.length ? `共 ${chains.length} 条链路` : '';
+  $('chainEmpty').hidden = chains.length > 0;
+  for (const chain of chains) {
+    const row = document.createElement('tr');
+    const name = cell(document.createTextNode(chain.name)); name.dataset.label = '链路'; row.appendChild(name);
+    const components = cell(document.createTextNode(chain.items.map((item) => {
+      const entry = (item.type === 'node' ? state.settings.proxies : chains).find((entry) => entry.id === item.id);
+      return `${item.type === 'node' ? '节点' : '链路'}: ${entry?.name || item.id}`;
+    }).join(' → ')));
+    components.className = 'node-route'; components.title = components.textContent; components.dataset.label = '组成'; row.appendChild(components);
+    const path = cell(document.createTextNode(chain.route.join(' → ')));
+    path.className = 'node-route'; path.title = path.textContent; path.dataset.label = '完整路径'; row.appendChild(path);
+    const visible = document.createElement('input');
+    visible.type = 'checkbox'; visible.checked = chain.showInList;
+    visible.setAttribute('aria-label', `${chain.name} 展示在实例列表`);
+    visible.addEventListener('change', async () => {
+      visible.disabled = true;
+      try {
+        const data = await api('PATCH', `/api/chains/${chain.id}`, { showInList: visible.checked });
+        state = data.state; renderProxyNodes(); renderTable();
+      } catch (err) { visible.checked = chain.showInList; toast(err.message, 'err'); }
+      finally { visible.disabled = false; }
+    });
+    const visibilityCell = cell(visible); visibilityCell.dataset.label = '实例列表'; row.appendChild(visibilityCell);
+    const actions = document.createElement('div'); actions.className = 'actions';
+    const test = button('测试', 'mini', false, () => testProxy(chain.id, test, 'chain'));
+    actions.appendChild(test);
+    actions.appendChild(button('编辑', 'mini', false, () => openChainModal(chain.id)));
+    actions.appendChild(button('复制', 'mini', false, () => openCopyModal('chains', chain)));
+    actions.appendChild(button('删除', 'danger mini', false, () => deleteChain(chain.id)));
+    const actionCell = cell(actions); actionCell.dataset.label = '操作'; row.appendChild(actionCell);
+    body.appendChild(row);
+  }
+}
+
+function fillNodeSelect(select, selectedId = '') {
+  select.textContent = '';
+  select.appendChild(new Option('不使用代理', ''));
+  for (const [label, type, entries] of [
+    ['代理节点', 'node', state.settings?.proxies || []], ['代理链路', 'chain', state.settings?.chains || []],
+  ]) {
+    const group = document.createElement('optgroup'); group.label = label;
+    for (const entry of entries) {
+      if (entry.showInList) group.appendChild(new Option(`${entry.name} · ${entry.route.join(' → ')}`, `${type}:${entry.id}`));
+    }
+    if (group.childElementCount) select.appendChild(group);
+  }
+  select.value = selectedId;
+}
+
+function selectedProxyTarget(value) {
+  const [type, id] = value.split(':');
+  return { proxyMode: id ? type : 'none', proxyNodeId: type === 'node' ? id : '', proxyChainId: type === 'chain' ? id : '' };
+}
+
+function openChainModal(id) {
+  editingChainId = id || null;
+  const chain = (state.settings.chains || []).find((entry) => entry.id === id);
+  $('chainModalTitle').textContent = chain ? `编辑链路 · ${chain.name}` : '新增链路';
+  $('chainName').value = chain?.name || '';
+  $('chainShow').checked = chain?.showInList !== false;
+  $('chainModalError').textContent = '';
+  chainDraft = chain?.items.map((item) => ({ ...item })) || [];
+  renderChainDraft();
+  showModal('chainModal');
+  $('chainName').focus();
+}
+
+function renderChainDraft() {
+  const body = $('chainItems'); body.textContent = '';
+  chainDraft.forEach((item, index) => {
+    const row = document.createElement('div'); row.className = 'chain-item';
+    const label = document.createElement('span'); label.textContent = `${index + 1}. ${item.type === 'node' ? '代理节点' : '代理链路'}`; row.appendChild(label);
+    const select = document.createElement('select');
+    const options = item.type === 'node' ? state.settings.proxies : state.settings.chains.filter((entry) => entry.id !== editingChainId);
+    for (const entry of options) select.appendChild(new Option(entry.name, entry.id));
+    select.value = item.id;
+    select.addEventListener('change', () => { item.id = select.value; });
+    row.appendChild(select);
+    row.appendChild(button('↑', 'mini', index === 0, () => { [chainDraft[index - 1], chainDraft[index]] = [chainDraft[index], chainDraft[index - 1]]; renderChainDraft(); }));
+    row.appendChild(button('↓', 'mini', index === chainDraft.length - 1, () => { [chainDraft[index + 1], chainDraft[index]] = [chainDraft[index], chainDraft[index + 1]]; renderChainDraft(); }));
+    row.appendChild(button('移除', 'danger mini', false, () => { chainDraft.splice(index, 1); renderChainDraft(); }));
+    body.appendChild(row);
+  });
+}
+
+function addChainItem(type) {
+  const entries = type === 'node' ? state.settings.proxies : state.settings.chains.filter((entry) => entry.id !== editingChainId);
+  if (!entries.length) return toast(type === 'node' ? '请先添加代理节点' : '还没有可添加的链路', 'err');
+  chainDraft.push({ type, id: entries[0].id }); renderChainDraft();
+}
+
+async function saveChain() {
+  try {
+    const body = { name: $('chainName').value.trim(), showInList: $('chainShow').checked, items: chainDraft };
+    const data = editingChainId ? await api('PATCH', `/api/chains/${editingChainId}`, body) : await api('POST', '/api/chains', body);
+    state = data.state; renderProxyNodes(); renderAll(); hideModal('chainModal'); toast('链路已保存', 'ok');
+  } catch (err) { $('chainModalError').textContent = err.message; }
+}
+
+async function deleteChain(id) {
+  const chain = state.settings.chains.find((entry) => entry.id === id);
+  if (!confirm(`删除链路「${chain.name}」？`)) return;
+  try {
+    const data = await api('DELETE', `/api/chains/${id}`);
+    state = data.state; renderProxyNodes(); renderAll(); toast('链路已删除', 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+function openCopyModal(kind, entry) {
+  copying = { kind, id: entry.id };
+  $('copyModalTitle').textContent = `复制${kind === 'chains' ? '链路' : '节点'} · ${entry.name}`;
+  $('copyModalError').textContent = '';
+  $('copyCount').value = 1;
+  showModal('copyModal'); $('copyCount').focus();
+}
+
+async function copyItem() {
+  try {
+    const data = await api('POST', `/api/${copying.kind}/${copying.id}/copy`, { count: Number($('copyCount').value) });
+    state = data.state; renderProxyNodes(); renderAll(); hideModal('copyModal'); toast(`已复制 ${data.created} 份`, 'ok');
+  } catch (err) { $('copyModalError').textContent = err.message; }
+}
 
 function openProxyModal(id) {
   editingProxyId = id || null;
   const proxy = id ? (state.settings.proxies || []).find((p) => p.id === id) : null;
-  $('proxyModalTitle').textContent = proxy ? '编辑代理' : '添加代理';
+  $('proxyModalTitle').textContent = proxy ? `编辑节点 · ${proxy.name}` : '添加节点';
   $('proxyModalError').textContent = '';
-  $('proxyPasteBlock').hidden = !!proxy; // pasting a list only makes sense when adding
-  $('pxList').value = '';
+  $('pxName').value = proxy?.name || '';
+  $('pxShow').checked = proxy?.showInList !== false;
   $('pxScheme').value = proxy?.scheme || 'http';
   $('pxHost').value = proxy?.host || '';
   $('pxPort').value = proxy?.port || '';
   $('pxUser').value = proxy?.username || '';
   $('pxPass').value = proxy?.password || '';
+  $('pxPaste').value = '';
   showModal('proxyModal');
-  (proxy ? $('pxHost') : $('pxList')).focus();
+  $('pxName').focus();
 }
 
 function readProxyForm() {
   return {
+    name: $('pxName').value.trim(),
+    showInList: $('pxShow').checked,
     enabled: true,
     scheme: $('pxScheme').value,
     host: $('pxHost').value.trim(),
@@ -161,50 +305,58 @@ function readProxyForm() {
 
 async function saveProxy() {
   try {
+    if ($('pxPaste').value.trim()) {
+      const parsed = await api('POST', '/api/proxy/parse', { line: $('pxPaste').value.trim() });
+      for (const [field, id] of [['scheme', 'pxScheme'], ['host', 'pxHost'], ['port', 'pxPort'], ['username', 'pxUser'], ['password', 'pxPass']]) {
+        $(id).value = parsed.proxy[field];
+      }
+      $('pxPaste').value = '';
+    }
     if (editingProxyId) {
-      const data = await api('PATCH', `/api/proxies/${editingProxyId}`, { proxy: readProxyForm() });
+      const data = await api('PATCH', `/api/proxies/${editingProxyId}`, readProxyForm());
       state = data.state;
-      renderSettings();
+      renderProxyNodes(); renderAll();
       hideModal('proxyModal');
       toast('已保存', 'ok');
       return;
     }
-    const form = readProxyForm();
-    const data = await api('POST', '/api/proxies', {
-      list: $('pxList').value,
-      proxy: form.host ? form : undefined,
-    });
+    const data = await api('POST', '/api/proxies', { node: readProxyForm() });
     state = data.state;
-    renderSettings();
-    if (data.errors.length) {
-      $('proxyModalError').textContent = `已添加 ${data.added} 个；${data.errors.length} 行没解析成功：${data.errors.join('；')}`;
-      return;
-    }
+    renderProxyNodes(); renderAll();
     hideModal('proxyModal');
-    const dup = data.duplicates ? `，${data.duplicates} 个已存在跳过` : '';
-    toast(data.added ? `已添加 ${data.added} 个代理${dup}` : `没有新增，${data.duplicates} 个已存在`, 'ok');
+    toast('节点已添加', 'ok');
   } catch (err) {
     $('proxyModalError').textContent = err.message;
   }
 }
 
-async function deleteProxy() {
-  const proxy = selectedProxy();
+async function deleteProxy(id) {
+  const proxy = (state.settings.proxies || []).find((p) => p.id === id);
   if (!proxy) return;
-  const following = state.profiles.filter((p) => p.proxyMode === 'global').length;
-  const warn = proxy.id === state.settings.proxyId && following
-    ? `\n有 ${following} 个 profile 正在「跟随全局」，删除后会改用列表里的下一个代理。`
-    : '';
-  if (!confirm(`删除代理 ${proxy.label}？${warn}`)) return;
+  if (!confirm(`删除节点「${proxy.name}」？`)) return;
   try {
     const data = await api('DELETE', `/api/proxies/${proxy.id}`);
     state = data.state;
-    renderSettings();
+    renderProxyNodes();
     renderAll();
-    toast('已删除', 'ok');
+    toast('节点已删除', 'ok');
   } catch (err) {
     toast(err.message, 'err');
   }
+}
+
+async function importProxies() {
+  try {
+    const data = await api('POST', '/api/proxies', { list: $('pxImportList').value });
+    state = data.state;
+    renderProxyNodes(); renderAll();
+    if (data.errors.length) {
+      $('proxyImportError').textContent = `已导入 ${data.added} 个；${data.errors.length} 行失败：${data.errors.join('；')}`;
+      return;
+    }
+    hideModal('proxyImportModal');
+    toast(`已导入 ${data.added} 个节点${data.duplicates ? `，跳过 ${data.duplicates} 个重复项` : ''}`, 'ok');
+  } catch (err) { $('proxyImportError').textContent = err.message; }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +400,14 @@ function renderTable() {
 
     const proxyCell = cell(document.createTextNode(profile.proxyLabel));
     proxyCell.className = 'proxy';
-    proxyCell.title = `${profile.proxyMode === 'custom' ? '独立代理' : profile.proxyMode === 'none' ? '不使用代理' : '跟随全局'} · ${profile.proxyLabel}`;
+    if (!['node', 'chain'].includes(profile.proxyMode) && profile.upstreamProxyLabel) {
+      const front = document.createElement('div');
+      front.className = 'muted small';
+      front.textContent = '前置: ' + profile.upstreamProxyLabel;
+      front.title = front.textContent;
+      proxyCell.appendChild(front);
+    }
+    proxyCell.title = profile.proxyLabel;
     row.appendChild(proxyCell);
 
     row.appendChild(cell(document.createTextNode(String(status.port || profile.port || '-'))));
@@ -268,7 +427,7 @@ function renderTable() {
     actions.appendChild(button(running ? '停止' : '启动', running ? 'danger mini' : 'primary mini', busy(status.status), () => (
       running ? stopProfile(profile.id) : startProfile(profile.id)
     )));
-    actions.appendChild(button('打开网址', 'mini', !running, () => openUrl(profile.id)));
+    actions.appendChild(button('打开网址', 'mini', false, () => openUrl(profile.id)));
     if (profile.mode === 'headless' && running) {
       actions.appendChild(button('API 文档', 'mini', false, () => window.open(`http://127.0.0.1:${status.port}/docs`, '_blank')));
     }
@@ -341,15 +500,57 @@ async function stopProfile(id) {
   }
 }
 
-async function openUrl(id) {
-  const url = prompt('要在该 profile 里打开的网址：', state.profiles.find((p) => p.id === id)?.effectiveStartUrl || 'https://');
+function renderUrlPresets(selected = $('openUrlPreset').value) {
+  const select = $('openUrlPreset');
+  select.textContent = '';
+  select.appendChild(new Option('选择预设', ''));
+  for (const url of state.settings?.urlPresets || []) select.appendChild(new Option(url, url));
+  select.value = selected;
+  $('btnDeleteUrlPreset').disabled = !select.value;
+}
+
+function openUrl(id) {
+  openUrlProfileId = id;
+  const profile = state.profiles.find((p) => p.id === id);
+  $('openUrlTitle').textContent = `在 ${profile.name} 中打开网址`;
+  $('openUrlInput').value = profile.effectiveStartUrl || '';
+  $('openUrlError').textContent = '';
+  renderUrlPresets('');
+  $('btnOpenUrl').disabled = statusOf(id).status !== 'running';
+  showModal('openUrlModal');
+  $('openUrlInput').focus();
+}
+
+async function saveUrlPreset() {
+  try {
+    const data = await api('POST', '/api/url-presets', { url: $('openUrlInput').value });
+    state = data.state;
+    $('openUrlInput').value = data.url;
+    renderUrlPresets(data.url);
+    $('openUrlError').textContent = '';
+    toast('网址预设已保存', 'ok');
+  } catch (err) { $('openUrlError').textContent = err.message; }
+}
+
+async function deleteUrlPreset() {
+  const url = $('openUrlPreset').value;
   if (!url) return;
   try {
-    await api('POST', `/api/profiles/${id}/open`, { url });
+    const data = await api('DELETE', `/api/url-presets?url=${encodeURIComponent(url)}`);
+    state = data.state;
+    renderUrlPresets('');
+    $('openUrlError').textContent = '';
+    toast('预设已删除', 'ok');
+  } catch (err) { $('openUrlError').textContent = err.message; }
+}
+
+async function submitOpenUrl() {
+  if (!openUrlProfileId) return;
+  try {
+    await api('POST', `/api/profiles/${openUrlProfileId}/open`, { url: $('openUrlInput').value });
+    hideModal('openUrlModal');
     toast('已打开新标签页', 'ok');
-  } catch (err) {
-    toast(err.message, 'err');
-  }
+  } catch (err) { $('openUrlError').textContent = err.message; }
 }
 
 async function deleteProfile(id) {
@@ -416,10 +617,6 @@ async function bulkDelete() {
 function showModal(id) { $(id).hidden = false; }
 function hideModal(id) { $(id).hidden = true; }
 
-function syncProxyFields() {
-  $('pfProxyFields').classList.toggle('hidden', $('pfProxyMode').value !== 'custom');
-}
-
 function openProfileModal(id) {
   editingId = id || null;
   const profile = id ? state.profiles.find((p) => p.id === id) : null;
@@ -429,16 +626,8 @@ function openProfileModal(id) {
   $('pfMode').value = profile?.mode || state.settings.defaultMode || 'visible';
   $('pfStartUrl').value = profile?.startUrl || '';
   $('pfPort').value = profile?.port || '';
-  $('pfProxyMode').value = profile?.proxyMode || 'global';
+  fillNodeSelect($('pfProxyNode'), profile?.proxyMode === 'node' ? `node:${profile.proxyNodeId}` : profile?.proxyMode === 'chain' ? `chain:${profile.proxyChainId}` : '');
   $('pfNote').value = profile?.note || '';
-  const proxy = profile?.proxy || {};
-  $('pfProxyScheme').value = proxy.scheme || 'http';
-  $('pfProxyHost').value = proxy.host || '';
-  $('pfProxyPort').value = proxy.port || '';
-  $('pfProxyUser').value = proxy.username || '';
-  $('pfProxyPass').value = proxy.password || '';
-  $('pfProxyPaste').value = '';
-  syncProxyFields();
   showModal('profileModal');
   $('pfName').focus();
 }
@@ -448,16 +637,8 @@ async function saveProfile() {
     name: $('pfName').value.trim(),
     mode: $('pfMode').value,
     startUrl: $('pfStartUrl').value.trim(),
-    proxyMode: $('pfProxyMode').value,
+    ...selectedProxyTarget($('pfProxyNode').value),
     note: $('pfNote').value.trim(),
-    proxy: {
-      enabled: true,
-      scheme: $('pfProxyScheme').value,
-      host: $('pfProxyHost').value.trim(),
-      port: $('pfProxyPort').value.trim(),
-      username: $('pfProxyUser').value.trim(),
-      password: $('pfProxyPass').value,
-    },
   };
   const port = $('pfPort').value.trim();
   if (port) payload.port = Number(port);
@@ -478,70 +659,27 @@ async function saveProfile() {
   }
 }
 
-async function pasteProxy(value) {
-  const line = value.trim();
-  if (!line) return;
-  try {
-    const { proxy } = await api('POST', '/api/proxy/parse', { line });
-    $('pfProxyScheme').value = proxy.scheme;
-    $('pfProxyHost').value = proxy.host;
-    $('pfProxyPort').value = proxy.port;
-    $('pfProxyUser').value = proxy.username;
-    $('pfProxyPass').value = proxy.password;
-    $('pfProxyMode').value = 'custom';
-    syncProxyFields();
-    $('pfProxyPaste').value = '';
-    $('profileModalError').textContent = '';
-  } catch (err) {
-    $('profileModalError').textContent = err.message;
-  }
-}
-
 function openBatchModal() {
   $('batchModalError').textContent = '';
-  $('bcChoice').hidden = true;
   $('bcMode').value = state.settings.defaultMode || 'visible';
+  fillNodeSelect($('bcProxyNode'));
   showModal('batchModal');
-  $('bcProxyList').focus();
+  $('bcPrefix').focus();
 }
 
-async function saveBatch(shortage) {
+async function saveBatch() {
   try {
     const data = await api('POST', '/api/profiles/batch', {
       prefix: $('bcPrefix').value.trim(),
       mode: $('bcMode').value,
       count: Number($('bcCount').value),
       startUrl: $('bcStartUrl').value.trim(),
-      proxyList: $('bcProxyList').value,
-      shortage,
+      ...selectedProxyTarget($('bcProxyNode').value),
     });
-
-    // Fewer proxies than profiles: the server created nothing and wants a call.
-    if (data.needsChoice) {
-      $('bcChoiceText').textContent =
-        `只粘贴了 ${data.proxyCount} 条代理，但要创建 ${data.count} 个 profile。不足的部分怎么处理？`;
-      $('bcSetGlobal').hidden = data.proxyCount !== 1;
-      $('bcChoice').hidden = false;
-      // Show which lines failed to parse *before* the user decides -- the
-      // "只粘贴了 N 条" count is otherwise misleading when lines were dropped.
-      $('batchModalError').textContent = data.errors.length
-        ? `${data.errors.length} 行没解析成功（不计入上面的条数）：${data.errors.join('；')}`
-        : '';
-      return;
-    }
-
     state = data.state;
-    renderSettings(); // setGlobal may have just replaced the global proxy
     renderAll();
-    // Parse errors are worth reading in full, so keep the dialog open for them.
-    if (data.errors.length) {
-      $('bcChoice').hidden = true;
-      $('batchModalError').textContent = `已创建 ${data.created} 个；${data.errors.length} 行没解析成功：${data.errors.join('；')}`;
-      toast(`已创建 ${data.created} 个 profile，${data.errors.length} 行有问题`, 'err');
-      return;
-    }
     hideModal('batchModal');
-    toast(data.note ? `已创建 ${data.created} 个 profile（${data.note}）` : `已创建 ${data.created} 个 profile`, 'ok');
+    toast(`已创建 ${data.created} 个 profile`, 'ok');
   } catch (err) {
     $('batchModalError').textContent = err.message;
   }
@@ -618,6 +756,8 @@ function connect() {
     // silently reverting the server. Skipped while the user is typing in it.
     const editing = $('settingsBody').contains(document.activeElement);
     if (!settingsRendered || !editing) renderSettings();
+    renderProxyNodes();
+    renderUrlPresets();
     // Drop selections for profiles that no longer exist (deleted here or in
     // another tab), otherwise bulk actions carry dead IDs and the "select all"
     // checkbox never matches.
@@ -655,12 +795,28 @@ function connect() {
 // wiring
 // ---------------------------------------------------------------------------
 
-document.querySelectorAll('[data-toggle]').forEach((head) => {
-  head.addEventListener('click', () => {
-    head.classList.toggle('collapsed');
-    $(head.dataset.toggle).classList.toggle('hidden');
+const tabs = [...document.querySelectorAll('.tabs [role="tab"]')];
+function activateTab(tab, focus = false) {
+  for (const item of tabs) {
+    const active = item === tab;
+    item.setAttribute('aria-selected', String(active));
+    item.tabIndex = active ? 0 : -1;
+    $(item.getAttribute('aria-controls')).hidden = !active;
+  }
+  if (focus) tab.focus();
+}
+for (const tab of tabs) {
+  tab.addEventListener('click', () => activateTab(tab));
+  tab.addEventListener('keydown', (event) => {
+    const index = tabs.indexOf(tab);
+    const target = event.key === 'ArrowRight' ? tabs[(index + 1) % tabs.length]
+      : event.key === 'ArrowLeft' ? tabs[(index - 1 + tabs.length) % tabs.length]
+        : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : null;
+    if (!target) return;
+    event.preventDefault();
+    activateTab(target, true);
   });
-});
+}
 
 document.querySelectorAll('[data-close-modal]').forEach((el) => {
   el.addEventListener('click', () => hideModal(el.dataset.closeModal));
@@ -677,19 +833,35 @@ document.addEventListener('keydown', (event) => {
 });
 
 $('btnSaveSettings').addEventListener('click', saveSettings);
-$('btnTestProxy').addEventListener('click', testProxy);
+$('openUrlPreset').addEventListener('change', (event) => {
+  if (event.target.value) $('openUrlInput').value = event.target.value;
+  $('btnDeleteUrlPreset').disabled = !event.target.value;
+});
+$('btnSaveUrlPreset').addEventListener('click', saveUrlPreset);
+$('btnDeleteUrlPreset').addEventListener('click', deleteUrlPreset);
+$('btnOpenUrl').addEventListener('click', submitOpenUrl);
+$('btnChainAdd').addEventListener('click', () => openChainModal(null));
+$('btnChainItemNode').addEventListener('click', () => addChainItem('node'));
+$('btnChainItemChain').addEventListener('click', () => addChainItem('chain'));
+$('btnSaveChain').addEventListener('click', saveChain);
+$('btnConfirmCopy').addEventListener('click', copyItem);
 $('btnProxyAdd').addEventListener('click', () => openProxyModal(null));
-$('btnProxyEdit').addEventListener('click', () => openProxyModal($('setProxySelect').value));
-$('btnProxyDelete').addEventListener('click', deleteProxy);
+$('btnProxyImport').addEventListener('click', () => {
+  $('proxyImportError').textContent = '';
+  $('pxImportList').value = '';
+  showModal('proxyImportModal');
+  $('pxImportList').focus();
+});
+$('btnSaveProxyImport').addEventListener('click', importProxies);
 $('btnSaveProxy').addEventListener('click', saveProxy);
-$('setProxySelect').addEventListener('change', () => {
-  // Switching the selection immediately reflects which buttons apply; the
-  // choice itself is only persisted by "保存设置".
-  const none = !$('setProxySelect').value;
-  $('btnProxyEdit').disabled = none;
-  $('btnProxyDelete').disabled = none;
-  $('btnTestProxy').disabled = none;
-  $('proxyTestResult').textContent = '';
+$('pxPaste').addEventListener('change', async (event) => {
+  if (!event.target.value.trim()) return;
+  try {
+    const { proxy } = await api('POST', '/api/proxy/parse', { line: event.target.value.trim() });
+    for (const [field, id] of [['scheme', 'pxScheme'], ['host', 'pxHost'], ['port', 'pxPort'], ['username', 'pxUser'], ['password', 'pxPass']]) $(id).value = proxy[field];
+    event.target.value = '';
+    $('proxyModalError').textContent = '';
+  } catch (err) { $('proxyModalError').textContent = err.message; }
 });
 $('btnNew').addEventListener('click', () => openProfileModal(null));
 $('btnBatch').addEventListener('click', openBatchModal);
@@ -697,12 +869,7 @@ $('btnStartSelected').addEventListener('click', bulkStart);
 $('btnStopSelected').addEventListener('click', bulkStop);
 $('btnDeleteSelected').addEventListener('click', bulkDelete);
 $('btnSaveProfile').addEventListener('click', saveProfile);
-$('btnSaveBatch').addEventListener('click', () => saveBatch());
-document.querySelectorAll('[data-shortage]').forEach((button) => {
-  button.addEventListener('click', () => saveBatch(button.dataset.shortage));
-});
-$('pfProxyMode').addEventListener('change', syncProxyFields);
-$('pfProxyPaste').addEventListener('change', (event) => pasteProxy(event.target.value));
+$('btnSaveBatch').addEventListener('click', saveBatch);
 $('checkAll').addEventListener('change', (event) => {
   selected = event.target.checked ? new Set(state.profiles.map((p) => p.id)) : new Set();
   renderTable();
