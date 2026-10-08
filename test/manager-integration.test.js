@@ -13,7 +13,7 @@ async function fixture(t, { mode = 'visible', front = null, exit = null } = {}) 
   for (const dir of ['lib', 'node_modules', 'plugins/desktop']) fs.mkdirSync(path.join(root, dir), { recursive: true });
   fs.writeFileSync(path.join(root, 'lib/config.js'), '');
   fs.writeFileSync(path.join(root, 'plugins/desktop/index.js'), '// fake plugin');
-  fs.writeFileSync(path.join(root, 'plugins/desktop/plugin.json'), '{"guiProtocol":2}');
+  fs.writeFileSync(path.join(root, 'plugins/desktop/plugin.json'), '{"guiProtocol":3}');
   fs.writeFileSync(path.join(root, 'plugins/desktop/window-size.js'), '');
   fs.writeFileSync(path.join(root, 'plugins/desktop/lifecycle.js'), '// fake lifecycle');
   fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');

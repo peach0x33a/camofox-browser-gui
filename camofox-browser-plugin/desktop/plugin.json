@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "guiProtocol": 2,
-  "description": "Render Camoufox on the host's real X display (visible window) and allow raw proxy URLs the env proxy pool can't express",
+  "guiProtocol": 3,
+  "description": "Render Camoufox on the native desktop (Linux, macOS, Windows) (visible window) and allow raw proxy URLs the env proxy pool can't express",
   "enableEnvVar": "CAMOFOX_DESKTOP"
 }

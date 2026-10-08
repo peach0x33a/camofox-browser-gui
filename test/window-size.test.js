@@ -14,7 +14,7 @@ test('desktop size falls back to X root when Xrandr gives no monitor size', () =
     if (command === 'xrandr') return 'no available outputs';
     assert.deepEqual(args, ['-root']);
     return '  Width: 1280\n  Height: 800\n';
-  });
+  }, 'linux');
   assert.deepEqual(result, { width: 1280, height: 800 });
 });
 

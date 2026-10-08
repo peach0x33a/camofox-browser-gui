@@ -9,7 +9,7 @@ import net from 'node:net';
 import { EventEmitter, once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { ROOT_DIR, detectCamofoxDir, camoufoxCacheDir } from '../src/paths.js';
+import { ROOT_DIR, detectCamofoxDir } from '../src/paths.js';
 import { register } from '../camofox-browser-plugin/desktop/index.js';
 import { createProxyRelay } from '../src/proxy-chain.js';
 import { listen, mockProxy } from '../test/helpers/proxies.js';
@@ -25,7 +25,7 @@ const t = { after: (fn) => cleanup.push(fn) };
 const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
 const port = probe.address().port; await new Promise((r) => probe.close(r));
 const gui = spawn(process.execPath, [path.join(ROOT_DIR, 'src/main.js'), '--port', String(port), '--no-open'], {
-  env: { ...process.env, CAMOFOX_GUI_DATA_DIR: dataDir, CAMOFOX_DIR: upstream }, stdio: ['ignore', 'pipe', 'pipe'],
+  env: { ...process.env, CAMOFOX_GUI_DATA_DIR: dataDir, CAMOFOX_DIR: upstream }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
 });
 const guiExit = once(gui, 'exit');
 let guiOutput = ''; gui.stdout.on('data', (c) => { guiOutput += c; }); gui.stderr.on('data', (c) => { guiOutput += c; });
@@ -161,7 +161,7 @@ try {
   }));
   relay = await createProxyRelay({ upstreamProxy: front.proxy, proxy: exit.proxy });
   const options = await launchOptions({
-    executable_path: process.env.CAMOUFOX_EXECUTABLE || path.join(camoufoxCacheDir(), 'camoufox-bin'),
+    executable_path: process.env.CAMOUFOX_EXECUTABLE || undefined,
     headless: !process.env.DISPLAY, virtual_display: process.env.DISPLAY,
     geoip: false, exclude_addons: ['UBO'],
   });
@@ -181,7 +181,7 @@ try {
   const tab = await context.newPage();
   const target = 'http://127.0.0.1:' + originPort + '/verified';
   await tab.goto(target);
-  if (process.env.DISPLAY) {
+  if (process.platform === 'linux' && process.env.DISPLAY) {
     const size = await tab.evaluate(() => ({ width: outerWidth, height: outerHeight, screenWidth: screen.width, screenHeight: screen.height }));
     assert.deepEqual(size, { width: 1200, height: 720, screenWidth: 1280, screenHeight: 800 });
   }
@@ -207,7 +207,10 @@ try {
 } finally {
   await uiBrowser?.close(); await camoufox?.close(); await relay?.close();
   for (const close of cleanup.reverse()) await close();
-  if (gui.exitCode === null) gui.kill('SIGTERM');
+  if (gui.exitCode === null) {
+    if (process.platform === 'win32' && gui.connected) gui.send({ type: 'camofox-gui-shutdown' });
+    else gui.kill('SIGTERM');
+  }
   const timer = setTimeout(() => gui.kill('SIGKILL'), 5000); await guiExit; clearTimeout(timer);
   fs.rmSync(dataDir, { recursive: true, force: true });
 }

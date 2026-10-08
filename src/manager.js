@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
-import { camoufoxInstalled, isCamofoxDir, profileDataDir } from './paths.js';
+import { ROOT_DIR, camoufoxInstalled, isCamofoxDir, profileDataDir } from './paths.js';
 import { normalizeOpenUrl } from './store.js';
 import { describeProxy, proxyEnv } from './proxy.js';
 import { createProxyRelay } from './proxy-chain.js';
@@ -236,7 +236,7 @@ export class Manager extends EventEmitter {
 
   #spawnServer(profile, port, camofoxDir, launchProxy, relay) {
     const env = this.#buildEnv(profile, port, launchProxy);
-    const proc = spawn(process.execPath, ['server.js'], {
+    const proc = spawn(process.execPath, [path.join(ROOT_DIR, 'scripts/browser-server.mjs')], {
       cwd: camofoxDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -350,9 +350,9 @@ export class Manager extends EventEmitter {
       const pluginDir = path.join(camofoxDir, 'plugins', 'desktop');
       let protocol;
       try { protocol = JSON.parse(fs.readFileSync(path.join(pluginDir, 'plugin.json'), 'utf8')).guiProtocol; } catch {}
-      if (protocol !== 2 || !fs.existsSync(path.join(pluginDir, 'lifecycle.js')) ||
+      if (protocol !== 3 || !fs.existsSync(path.join(pluginDir, 'lifecycle.js')) ||
           !fs.existsSync(path.join(pluginDir, 'window-size.js'))) {
-        throw new Error('请先运行 ./scripts/install-plugin.sh 更新 desktop 插件，再启动可见实例');
+        throw new Error('请先运行 npm run install-plugin 更新 desktop 插件，再启动可见实例');
       }
     }
 
@@ -452,16 +452,35 @@ export class Manager extends EventEmitter {
     if (!proc || !proc.pid || proc.exitCode !== null || proc.signalCode) return;
     const exited = new Promise((resolve) => proc.once('exit', resolve));
     try {
-      proc.kill('SIGTERM');
+      if (process.platform === 'win32' && proc.connected) {
+        proc.send({ type: 'camofox-gui-shutdown' }, (err) => {
+          if (err && proc.exitCode === null) this.#forceKill(proc);
+        });
+      } else proc.kill('SIGTERM');
     } catch {
       return; // already reaped
     }
     const timer = setTimeout(() => {
-      if (!silent) this.#log(id, 'SIGTERM 超时，强制结束进程', 'warn');
-      proc.kill('SIGKILL');
+      if (!silent) this.#log(id, '停止超时，强制结束进程', 'warn');
+      this.#forceKill(proc);
     }, STOP_TIMEOUT_MS);
     await exited;
     clearTimeout(timer);
+  }
+
+  #forceKill(proc) {
+    if (proc.exitCode !== null || proc.signalCode) return;
+    if (process.platform === 'win32') {
+      // Kill only this server's descendant tree, never unrelated browsers.
+      const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      const fallback = () => {
+        if (proc.exitCode === null && !proc.signalCode) { try { proc.kill('SIGKILL'); } catch {} }
+      };
+      killer.on('error', fallback);
+      killer.on('exit', (code) => { if (code !== 0) fallback(); });
+    } else {
+      try { proc.kill('SIGKILL'); } catch { /* already exited */ }
+    }
   }
 
   async #kill(id, options = {}) {

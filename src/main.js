@@ -9,7 +9,7 @@
  * Usage: node src/main.js [--port 8790] [--host 127.0.0.1] [--no-open]
  */
 
-import { spawn } from 'node:child_process';
+import { openInBrowser } from './platform.js';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -69,13 +69,6 @@ function originAllowed(req, port) {
   return [`http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`].includes(origin);
 }
 
-function openInBrowser(url) {
-  try {
-    const child = spawn('xdg-open', [url], { stdio: 'ignore', detached: true });
-    child.on('error', () => {});
-    child.unref();
-  } catch { /* headless box: the user opens the URL themselves */ }
-}
 
 const options = parseArgs(process.argv.slice(2));
 if (options.help) {
@@ -136,3 +129,7 @@ async function shutdown(signal) {
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+process.on('message', (message) => {
+  if (message?.type === 'camofox-gui-shutdown' && process.connected) shutdown('IPC');
+});

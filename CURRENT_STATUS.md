@@ -1,15 +1,15 @@
 # 当前状态
 
-更新日期：2026-10-04
+更新日期：2026-10-08
 
-项目：`/home/peach0x33a/workspace/fingerprint/camofox-gui`。正式 GUI 位于 `http://127.0.0.1:8790`，工具终端会话 83075，数据目录 `~/.camofox-gui`。同级 `camofox-browser/plugins/desktop/` 已同步新版插件。
+工作区：`/home/peach0x33a/workspace/fingerprint/camofox-gui`。同级服务：`../camofox-browser`。
 
-控制台默认 Profiles；另有独立的「代理节点」「代理链路」「通用工具」「全局设置」「运行日志」标签，采用平面布局。节点是单个代理端点；链路是独立的有序组件列表，允许节点、已有链路和嵌套引用，可调整顺序、测试与指定数量复制。节点和链路分别决定是否展示在实例选择中；隐藏组件仍可在链路内使用。旧前置关系已迁移到 version 3。正式配置 4 个实例原有代理路径及凭据经比对全部保留，备份在 `~/.camofox-gui/config.json.pre-v3-20261003`（600 权限），目前没有运行中的实例。
+已完成 macOS / Windows 原生适配代码：跨平台安装器 `npm run install-plugin`、Windows `start.cmd`、系统浏览器自动打开、Windows 内核目录探测、原生可见窗口及屏幕尺寸约束、Windows 2047 字符指纹分段、IPC 正常退出和超时进程树清理。Linux 可见窗口保持 X display 路径。desktop 插件 guiProtocol 已升至 3，使用新 GUI 前须重装插件并重启实例。
 
-通用工具可计算 TOTP，并通过“账号清单解析”弹窗将 `账号----密码----2FA密钥` 逐行解析为带复制按钮的表格，密钥仅存在页面内存中。“打开网址”可以保存、选择和删除共用预设，支持 `chatgpt.com` 等无协议输入。可见 Camoufox 新窗口按当前 X 显示尺寸约束，关闭最后一个页面后不自动重启或闪现。
+原有 Profiles / 代理节点 / 嵌套链路 / 工具 / 预设 / 日志功能保留。运行数据默认仍在 `~/.camofox-gui`；本次未操作现有数据、实例或同级已安装插件。此前记录中的服务终端会话不作为本轮已核实状态。
 
-账号清单表格中，每行 TOTP 验证码下方都有进度条，每 100ms 更新剩余有效时间，在 30 秒周期切换时填满并触发验证码刷新。单独计算区保留数字倒计时。运行日志的实例选择与“清空显示”按钮保持同一行，窄屏下选择框缩小以适应可用空间。
+验证：离线测试 50/50；Linux Xvfb 真实浏览器集成通过，覆盖 UI、代理链、窗口尺寸、被动探活和最后一页关闭。macOS / Windows 原生实机验收尚未完成。三平台 Node 24 GitHub Actions 离线测试矩阵已添加但未运行。本轮发布目标为 `origin/main`，包含适配代码、测试、文档和任务记录；原生实机验收仍为后续事项。
 
-验证：`npm test` 42/42；`git diff --check`；Xvfb 真实浏览器集成通过，含 1280×800 显示上的 1200×720 窗口、代理链访问、账号表复制、TOTP 进度及验证码跨周期刷新、移动布局与关闭行为。日志工具栏在 1280、390、320 像素宽度下并排且不溢出。代码、测试、文档和任务记录统一纳入本轮 main 提交，推送目标 `origin/main`。
+使用：安装 Node 24 和 Git，clone GUI 和同级服务，在服务目录执行 `npm install`、`npx camoufox-js fetch`，回 GUI 执行 `npm run install-plugin`、`npm start`。完整平台步骤见 README。
 
-记录：[本次功能](task-history/2026-10-03-independent-chains-and-tools.md)、[上一版分离节点与链路](task-history/2026-10-03-split-nodes-and-chains.md)、[窗口生命周期](task-history/2026-10-01-window-lifecycle-and-front-proxy.md)。
+记录：[本轮原生适配](task-history/2026-10-08-native-macos-windows.md)、[此前工具界面](task-history/2026-10-04-account-totp-progress.md)。

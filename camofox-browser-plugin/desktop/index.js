@@ -17,7 +17,7 @@
  *
  * Environment:
  *   CAMOFOX_DESKTOP=1               Enable the plugin (also loadable via config)
- *   CAMOFOX_DESKTOP_DISPLAY=1       Render on the real X display instead of Xvfb
+ *   CAMOFOX_DESKTOP_DISPLAY=1       Show a native desktop window (Linux uses real X display)
  *   CAMOFOX_DESKTOP_DISPLAY_NAME    X display to use (default: $DISPLAY, else :0)
  *   CAMOFOX_RAW_PROXY_SERVER        e.g. socks5://127.0.0.1:1080
  *   CAMOFOX_RAW_PROXY_USERNAME
@@ -68,7 +68,7 @@ export function resolveRawProxy(env = process.env) {
   return proxy;
 }
 
-export async function register(app, ctx, pluginConfig = {}) {
+export async function register(app, ctx, pluginConfig = {}, platform = process.platform) {
   const { events, log } = ctx;
   const env = process.env;
 
@@ -76,8 +76,17 @@ export async function register(app, ctx, pluginConfig = {}) {
   const wantsHostDisplay = envFlag(env.CAMOFOX_DESKTOP_DISPLAY) || pluginConfig.hostDisplay === true;
   if (wantsHostDisplay) {
     installVisibleLifecycle(app, ctx);
-    const display = resolveHostDisplay(env);
-    if (!display) {
+    const display = platform === 'linux' ? resolveHostDisplay(env) : null;
+    if (platform === 'darwin' || platform === 'win32') {
+      events.on('browser:launching', ({ options }) => {
+        options.headless = false;
+        // Upstream generated options in headless mode; use the native desktop.
+        if (options.env) delete options.env.DISPLAY;
+        const screen = readDisplaySize(null, undefined, platform);
+        const size = fitWindowToDisplay(options, screen, platform);
+        log('info', 'desktop plugin: native visible window', { platform, screen, window: size });
+      });
+    } else if (!display) {
       log('warn', 'desktop plugin: no usable X display, keeping Xvfb', {
         requested: env.CAMOFOX_DESKTOP_DISPLAY_NAME || env.DISPLAY || null,
       });

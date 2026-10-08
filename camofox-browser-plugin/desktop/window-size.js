@@ -1,5 +1,5 @@
 /** Keep visible Camoufox windows on the host display. The upstream JS launcher
- * generates random screen/window dimensions without inspecting X11 monitors. */
+ * generates random screen/window dimensions without inspecting host monitors. */
 import { execFileSync } from 'node:child_process';
 
 export function parseXrandr(output) {
@@ -14,7 +14,17 @@ export function parseXrandr(output) {
   return current ? { width: Number(current[1]), height: Number(current[2]) } : null;
 }
 
-export function readDisplaySize(display, run = execFileSync) {
+export function readDisplaySize(display, run = execFileSync, platform = process.platform) {
+  const nativeOptions = { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true };
+  if (platform === 'darwin' || platform === 'win32') {
+    try {
+      const output = platform === 'darwin'
+        ? run('osascript', ['-l', 'JavaScript', '-e', 'ObjC.import("AppKit"); var screens = $.NSScreen.screens; var w = [], h = []; for (var i = 0; i < screens.count; i++) { var f = screens.objectAtIndex(i).visibleFrame; w.push(f.size.width); h.push(f.size.height); } JSON.stringify({width: Math.min.apply(null, w), height: Math.min.apply(null, h)})'], nativeOptions)
+        : run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; $screens = [System.Windows.Forms.Screen]::AllScreens; @{width=($screens | ForEach-Object {$_.WorkingArea.Width} | Measure-Object -Minimum).Minimum; height=($screens | ForEach-Object {$_.WorkingArea.Height} | Measure-Object -Minimum).Minimum} | ConvertTo-Json -Compress'], nativeOptions);
+      const size = JSON.parse(String(output).trim());
+      return Number.isInteger(size.width) && Number.isInteger(size.height) && size.width > 0 && size.height > 0 ? size : null;
+    } catch { return null; }
+  }
   const env = { ...process.env, DISPLAY: display };
   try {
     const screen = parseXrandr(run('xrandr', ['--current'], { env, encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }));
@@ -28,7 +38,7 @@ export function readDisplaySize(display, run = execFileSync) {
   } catch { return null; }
 }
 
-export function fitWindowToDisplay(options, displaySize) {
+export function fitWindowToDisplay(options, displaySize, platform = process.platform) {
   const screenWidth = displaySize?.width;
   const screenHeight = displaySize?.height;
   if (!Number.isInteger(screenWidth) || !Number.isInteger(screenHeight) ||
@@ -65,9 +75,9 @@ export function fitWindowToDisplay(options, displaySize) {
 
   const encoded = JSON.stringify(config);
   for (const key of keys) delete env[key];
-  // camoufox-js uses 32767-character chunks on Linux for its config env vars.
-  for (let i = 0; i < encoded.length; i += 32767) {
-    env[`CAMOU_CONFIG_${Math.floor(i / 32767) + 1}`] = encoded.slice(i, i + 32767);
+  const chunkSize = platform === 'win32' ? 2047 : 32767;
+  for (let i = 0; i < encoded.length; i += chunkSize) {
+    env[`CAMOU_CONFIG_${Math.floor(i / chunkSize) + 1}`] = encoded.slice(i, i + chunkSize);
   }
   return { width, height };
 }

@@ -15,6 +15,54 @@
 ./start.sh --port 9000 --no-open
 ```
 
+## macOS / Windows 原生使用
+
+已补齐两平台的原生启动和可见窗口代码，不需要 WSL 或 X server。当前本机验证环境为 Linux；macOS / Windows 的原生窗口、系统屏幕读取和进程树清理仍待实机验证。仓库提供三平台 GitHub Actions 离线测试矩阵。
+
+先安装 **Node.js 24** 和 Git。在终端（Windows 用 PowerShell）依次执行：
+
+```text
+git clone https://github.com/peach0x33a/camofox-browser-gui
+git clone https://github.com/jo-inc/camofox-browser
+cd camofox-browser
+npm install
+npx camoufox-js fetch
+cd ../camofox-browser-gui
+npm run install-plugin
+npm start
+```
+
+下载器会按当前系统和 CPU 选择内核；不要使用下文示例里的 Linux ZIP。当前 camoufox-js 0.10.2 支持 macOS Intel / Apple Silicon、Windows x64 / x86；Windows ARM64 原生内核不在该版本支持矩阵中。
+
+打开 `http://127.0.0.1:8790`，在「全局设置」确认 camofox-browser 路径，在「Profiles」新建实例并选择「可见窗口」，点击「启动」。需要代理时先添加并测试代理节点。运行期间保持终端开启，退出用 Ctrl+C，等待实例停止后再关闭终端。
+
+- **macOS**：也可执行 `bash start.sh`；GUI 用系统 `open` 打开控制台，Camoufox 直接显示原生窗口。
+- **Windows**：安装完成后也可双击 `start.cmd`。无需执行 `.sh`；PowerShell 如果拦截 `npm.ps1` / `npx.ps1`，使用 `npm.cmd` / `npx.cmd` 执行上述命令。
+- 两平台可见窗口按系统屏幕工作区调整尺寸；屏幕查询失败时保留内核原有尺寸。Windows 停止实例通过 IPC 调用服务的正常退出处理，超时才结束该服务的进程树。
+- GUI 升级后重新执行 `npm run install-plugin`，再重启 GUI 和实例。自定义目录可用 `npm run install-plugin -- "实际的 camofox-browser 路径"`。
+
+首次下载需要代理时，在启动 GUI **之前**设置环境变量（端口按实际代理软件修改）：
+
+macOS：
+
+```bash
+export http_proxy=http://127.0.0.1:7890
+export https_proxy=http://127.0.0.1:7890
+export NODE_USE_ENV_PROXY=1
+npm start
+```
+
+Windows PowerShell：
+
+```powershell
+$env:http_proxy = "http://127.0.0.1:7890"
+$env:https_proxy = "http://127.0.0.1:7890"
+$env:NODE_USE_ENV_PROXY = "1"
+npm.cmd start
+```
+
+内核缓存：macOS 为 `~/Library/Caches/camoufox/`，Windows 默认 `%USERPROFILE%\AppData\Local\camoufox\camoufox\Cache\`。已有内核也可设置 `CAMOUFOX_EXECUTABLE` 指向实际可执行文件：macOS 的 `Camoufox.app/Contents/MacOS/camoufox`，Windows 的 `camoufox.exe`。
+
 ## 能做什么
 
 - **代理节点** —— 在独立标签保存或批量导入 HTTP / HTTPS / SOCKS5 节点，管理地址、凭据及是否展示在实例列表。
@@ -45,7 +93,7 @@ camofox-gui (8790)
 
 ## 准备工作
 
-需要 Node 20+（推荐 24，见下方「受限网络」一节）。
+GUI 需要 Node 20+，当前同级 camofox-browser 需要 Node 22+；新安装统一推荐 Node 24（见下方「受限网络」一节）。
 
 ```bash
 git clone https://github.com/peach0x33a/camofox-browser-gui
@@ -67,6 +115,8 @@ cd ../camofox-browser-gui
 探测不到 camofox-browser 目录时，在界面「全局设置」里手动填路径即可。
 
 ## 可见窗口是怎么实现的
+
+macOS / Windows 下，desktop 插件在浏览器启动事件中启用原生有头模式，复用同一套页面关闭追踪和被动探活。
 
 Linux 上 camofox-browser 总是把 Camoufox 渲染到一块临时 Xvfb 虚拟屏，所以窗口默认看不见。
 本项目附带一个 camofox-browser 插件 `camofox-browser-plugin/desktop/`，它替换 `ctx.createVirtualDisplay`，
@@ -147,7 +197,7 @@ curl -L --retry 5 -C - -o /tmp/camoufox.zip \
 
 `npm test` 运行纯本地测试：代理链协议组合、四跳传输、嵌套链路的环路与依赖、复制和配置迁移、失败不直连、转发器回收、实例进程生命周期、被动探活和密码回填。测试使用临时数据目录，自签名证书仅用于本地 fixture。
 
-`xvfb-run -a node scripts/verify-browser.mjs` 使用同级 camofox-browser 的 Playwright / Camoufox 依赖验证真实浏览器：链路新建/嵌套/复制、实例选择、网址预设、TOTP 与账号解析、桌面及手机布局、代理链访问、窗口尺寸、可见窗口探活与最后一页关闭。需已安装 Camoufox 内核和 Chromium；截图输出到 `.impeccable/review/`，不会操作已有实例。
+Linux 上用 `xvfb-run -a -s "-screen 0 1280x800x24" node scripts/verify-browser.mjs`，macOS / Windows 上用 `node scripts/verify-browser.mjs`，使用同级 camofox-browser 的 Playwright / Camoufox 依赖验证真实浏览器：链路新建/嵌套/复制、实例选择、网址预设、TOTP 与账号解析、桌面及手机布局、代理链访问、窗口尺寸、可见窗口探活与最后一页关闭。需已安装 Camoufox 内核和 Chromium；截图输出到 `.impeccable/review/`，不会操作已有实例。
 
 默认使用同级 Playwright 对应的 Chromium 构建。若该构建未安装，可通过可选环境变量 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定本机已有的 Chromium 可执行文件，例如（路径请按实际安装位置调整）：
 

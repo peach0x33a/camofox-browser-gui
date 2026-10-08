@@ -13,7 +13,8 @@
   },
   "scripts": {
     "start": "node src/main.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "install-plugin": "node scripts/install-plugin.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -85,9 +85,10 @@ export function isCamofoxDir(dir) {
  * Where camoufox-js keeps the downloaded browser bundle. Mirrors
  * camofox-browser's lib/config.js so the GUI can warn before launching.
  */
-export function camoufoxCacheDir() {
-  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Caches', 'camoufox');
-  return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'camoufox');
+export function camoufoxCacheDir(platform = process.platform, env = process.env, home = os.homedir()) {
+  if (platform === 'darwin') return path.join(home, 'Library', 'Caches', 'camoufox');
+  if (platform === 'win32') return path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'camoufox', 'camoufox', 'Cache');
+  return path.join(env.XDG_CACHE_HOME || path.join(home, '.cache'), 'camoufox');
 }
 
 /** True when a usable Camoufox bundle is available (downloaded or external). */
@@ -99,7 +100,10 @@ export function camoufoxInstalled() {
     ''
   ).trim();
   if (external) return fs.existsSync(external);
-  return fs.existsSync(path.join(camoufoxCacheDir(), 'version.json'));
+  const caches = [camoufoxCacheDir()];
+  // camoufox-js 0.10.2 uses the home directory even if LOCALAPPDATA is redirected.
+  if (process.platform === 'win32') caches.push(path.join(os.homedir(), 'AppData', 'Local', 'camoufox', 'camoufox', 'Cache'));
+  return caches.some((cache) => fs.existsSync(path.join(cache, 'version.json')));
 }
 
 /**
